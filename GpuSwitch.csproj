@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>MsiGpuSwitch</RootNamespace>
+    <AssemblyName>MSI GPUSwitch</AssemblyName>
+    <!-- 需要 SYSTEM 级别权限才能访问 root\wmi 下的 MSI ACPI 类,
+         所以让 exe 带 requireAdministrator manifest. -->
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+
+    <!-- 单文件发布 (框架依赖) -->
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>false</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <DebugType>embedded</DebugType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.Management" Version="8.0.0" />
+    <PackageReference Include="System.ServiceProcess.ServiceController" Version="8.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Bundle FeatureManager (MSIAPService + FM Service) into output directory -->
+    <None Include="FeatureManager\**" LinkBase="FeatureManager\">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+</Project>

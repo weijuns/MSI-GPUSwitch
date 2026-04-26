@@ -1,0 +1,15 @@
+﻿正在安装程序集“C:\Program Files (x86)\Feature Manager\MSIAPService.exe”。
+受影响的参数是:
+   logtoconsole = 
+   i = 
+   assemblypath = C:\Program Files (x86)\Feature Manager\MSIAPService.exe
+   logfile = C:\Program Files (x86)\Feature Manager\MSIAPService.InstallLog
+正在安装服务 MSI Foundation Service...
+正在日志 Application 中创建 EventLog 源 MSI Foundation Service...
+正在回滚程序集“C:\Program Files (x86)\Feature Manager\MSIAPService.exe”。
+受影响的参数是:
+   logtoconsole = 
+   i = 
+   assemblypath = C:\Program Files (x86)\Feature Manager\MSIAPService.exe
+   logfile = C:\Program Files (x86)\Feature Manager\MSIAPService.InstallLog
+正在将事件日志还原到源 MSI Foundation Service 的前一状态。
