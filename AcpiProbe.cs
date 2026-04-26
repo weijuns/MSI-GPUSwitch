@@ -538,7 +538,7 @@ internal static class AcpiProbe
         string exeDir = AppContext.BaseDirectory;
         string[] fmDirCandidates =
         {
-            @"C:\Program Files\MSI Flux\FeatureManager",                                          // Auto-extracted by MSI Flux
+            @"C:\ProgramData\MSI Flux\FeatureManager",                                          // Auto-extracted by MSI Flux
             System.IO.Path.GetFullPath(System.IO.Path.Combine(exeDir, "FeatureManager")),       // Bundled with MSI GPUSwitch
             @"C:\Program Files (x86)\Feature Manager",                                           // System install
         };
