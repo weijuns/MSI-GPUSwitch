@@ -548,72 +548,91 @@ internal static class AcpiProbe
         Console.WriteLine($"  FeatureManager 目录: {fmDir}");
 
         // 步骤 1: 启动 MSI Foundation Service (MSIAPService.exe)
+        // MSIAPService.exe 是 Windows 服务, 不能直接运行, 必须先 InstallUtil 安装再 sc start
         const string svcName = "MSI Foundation Service";
         bool msiFoundationReady = false;
+
+        // 1a. 尝试直接启动已注册的 Windows 服务
         try
         {
             using var svc = new System.ServiceProcess.ServiceController(svcName);
-            if (svc.Status != System.ServiceProcess.ServiceControllerStatus.Running)
-            {
-                Console.WriteLine($"  启动 {svcName}...");
-                try
-                {
-                    svc.Start();
-                    svc.WaitForStatus(System.ServiceProcess.ServiceControllerStatus.Running, TimeSpan.FromSeconds(10));
-                    msiFoundationReady = true;
-                    Console.WriteLine($"  ✓ {svcName} 已启动");
-                }
-                catch
-                {
-                    // Windows 服务未注册或启动失败; 尝试直接运行 MSIAPService.exe
-                    if (System.IO.File.Exists(msiApSvcPath))
-                    {
-                        Console.WriteLine($"  从 {msiApSvcPath} 启动...");
-                        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(msiApSvcPath)
-                        {
-                            CreateNoWindow = true,
-                            UseShellExecute = false
-                        });
-                        System.Threading.Thread.Sleep(3000);
-                        msiFoundationReady = true;
-                        Console.WriteLine($"  ✓ MSIAPService.exe 已启动");
-                    }
-                    else
-                    {
-                        Console.ForegroundColor = ConsoleColor.Red;
-                        Console.WriteLine($"  ❌ 找不到 {msiApSvcPath}, 也无法启动 Windows 服务");
-                        Console.WriteLine("     GPU 切换不会生效, 中止.");
-                        Console.ResetColor();
-                        return;
-                    }
-                }
-            }
-            else
+            if (svc.Status == System.ServiceProcess.ServiceControllerStatus.Running)
             {
                 msiFoundationReady = true;
                 Console.WriteLine($"  ✓ {svcName} 已在运行");
             }
+            else
+            {
+                Console.WriteLine($"  启动 {svcName}...");
+                svc.Start();
+                svc.WaitForStatus(System.ServiceProcess.ServiceControllerStatus.Running, TimeSpan.FromSeconds(10));
+                msiFoundationReady = true;
+                Console.WriteLine($"  ✓ {svcName} 已启动");
+            }
         }
         catch (Exception ex)
         {
-            // ServiceController 本身失败 (服务未注册); 尝试直接运行
+            // 服务未注册或启动失败
+            Console.WriteLine($"  {svcName} 未注册或启动失败: {ex.Message}");
+
+            // 1b. 尝试用 InstallUtil 安装服务, 然后启动
             if (System.IO.File.Exists(msiApSvcPath))
             {
-                Console.WriteLine($"  Windows 服务未注册, 从 {msiApSvcPath} 启动...");
-                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(msiApSvcPath)
+                string installUtil = System.IO.Path.Combine(
+                    System.Environment.GetFolderPath(System.Environment.SpecialFolder.Windows),
+                    @"Microsoft.NET\Framework64\v4.0.30319\InstallUtil.exe");
+
+                if (System.IO.File.Exists(installUtil))
                 {
-                    CreateNoWindow = true,
-                    UseShellExecute = false
-                });
-                System.Threading.Thread.Sleep(3000);
-                msiFoundationReady = System.Diagnostics.Process.GetProcessesByName("MSIAPService").Length > 0;
-                if (msiFoundationReady)
-                    Console.WriteLine($"  ✓ MSIAPService.exe 已启动");
+                    Console.WriteLine($"  安装 {svcName} (InstallUtil)...");
+                    try
+                    {
+                        var p = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(installUtil)
+                        {
+                            Arguments = $"/i \"{msiApSvcPath}\"",
+                            CreateNoWindow = true,
+                            UseShellExecute = false,
+                            RedirectStandardOutput = true,
+                            RedirectStandardError = true
+                        });
+                        p!.WaitForExit(15000);
+                        Console.WriteLine($"  InstallUtil 退出码: {p.ExitCode}");
+
+                        // 安装后启动服务
+                        try
+                        {
+                            using var svc2 = new System.ServiceProcess.ServiceController(svcName);
+                            svc2.Start();
+                            svc2.WaitForStatus(System.ServiceProcess.ServiceControllerStatus.Running, TimeSpan.FromSeconds(10));
+                            msiFoundationReady = true;
+                            Console.WriteLine($"  ✓ {svcName} 已安装并启动");
+                        }
+                        catch (Exception ex2)
+                        {
+                            Console.ForegroundColor = ConsoleColor.Yellow;
+                            Console.WriteLine($"  ⚠️ 安装后启动失败: {ex2.Message}");
+                            Console.ResetColor();
+                        }
+                    }
+                    catch (Exception ex3)
+                    {
+                        Console.ForegroundColor = ConsoleColor.Yellow;
+                        Console.WriteLine($"  ⚠️ InstallUtil 执行失败: {ex3.Message}");
+                        Console.ResetColor();
+                    }
+                }
+                else
+                {
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.WriteLine($"  ⚠️ 找不到 InstallUtil.exe ({installUtil})");
+                    Console.WriteLine("     请手动安装 MSI Foundation Service: InstallUtil /i MSIAPService.exe");
+                    Console.ResetColor();
+                }
             }
             else
             {
                 Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine($"  ❌ 无法启动 MSI Foundation Service: {ex.Message}");
+                Console.WriteLine($"  ❌ 找不到 {msiApSvcPath}");
                 Console.WriteLine("     GPU 切换不会生效, 中止.");
                 Console.ResetColor();
                 return;
@@ -622,7 +641,13 @@ internal static class AcpiProbe
 
         if (!msiFoundationReady)
         {
-            msiFoundationReady = System.Diagnostics.Process.GetProcessesByName("MSIAPService").Length > 0;
+            // 最后检查: 也许服务已经在运行 (被其他进程启动)
+            try
+            {
+                using var svc3 = new System.ServiceProcess.ServiceController(svcName);
+                msiFoundationReady = svc3.Status == System.ServiceProcess.ServiceControllerStatus.Running;
+            }
+            catch { }
         }
 
         if (!msiFoundationReady)

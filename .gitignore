@@ -1,6 +1,7 @@
 ## Build output
 bin/
 obj/
+publish/
 
 ## IDE
 .vs/
@@ -16,3 +17,9 @@ Desktop.ini
 ## Snapshots
 snapshot.txt
 dump.txt
+
+## Release packages
+*.zip
+
+## Logs
+*.InstallLog
