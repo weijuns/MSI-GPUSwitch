@@ -64,6 +64,19 @@ while (true)
     Console.WriteLine("  [qs]  快速查看多处 GPU 状态位");
     Console.WriteLine("  [snap] 保存全状态快照到 snapshot.txt");
     Console.WriteLine();
+    Console.WriteLine("  🔥 完全摆脱 Feature Manager 的引导命令 (重启后永久生效)");
+    Console.WriteLine("  [bs]    检查 wmiacpi.sys MofImagePath 配置状态");
+    Console.WriteLine("  [boot]  引导: 复制 msiapcfg.dll + 设置 MofImagePath 注册表");
+    Console.WriteLine("  [unboot] 卸载引导: 删除 msiapcfg.dll + 清除注册表");
+    Console.WriteLine("  [uv]    读取 UEFI 变量 MsiDCVarData[5] 显示当前持久化的 GPU 模式");
+    Console.WriteLine();
+    Console.WriteLine("  🔧 MSI Foundation Service 管理 (实测切换可能依赖此服务在跑)");
+    Console.WriteLine("  [srv]         查看服务状态");
+    Console.WriteLine("  [srv-install] InstallUtil 安装 MSIAPService 为 Windows 服务");
+    Console.WriteLine("  [srv-start]   启动服务");
+    Console.WriteLine("  [srv-stop]    停止服务");
+    Console.WriteLine("  [srv-remove]  卸载服务");
+    Console.WriteLine();
     Console.WriteLine("  [0] 退出");
     Console.WriteLine("====================================================================");
     Console.Write("输入编号并回车: ");
@@ -207,6 +220,53 @@ while (true)
 
             case "gpue": case "GPUE": case "gpuE":
                 AcpiProbe.ReplayMsiCenterSwitch(targetMode: 2);
+                break;
+
+            case "bs": case "BS":
+                WmiAcpiBootstrap.PrintStatus();
+                break;
+
+            case "boot": case "BOOT":
+                Console.WriteLine("⚠️ 此操作将:");
+                Console.WriteLine("   1. 复制 msiapcfg.dll 到 C:\\Windows\\SysWOW64\\");
+                Console.WriteLine("   2. 设置 HKLM\\SYSTEM\\CurrentControlSet\\Services\\WmiAcpi\\MofImagePath");
+                Console.WriteLine("   重启后生效, 之后即使卸载 Feature Manager 也能 GPU 切换.");
+                Console.Write("继续吗? 输入 YES 确认: ");
+                if (Console.ReadLine()?.Trim() == "YES")
+                    WmiAcpiBootstrap.Install();
+                else
+                    Console.WriteLine("已取消.");
+                break;
+
+            case "uv": case "UV":
+                UefiVariable.PrintCurrentMode();
+                break;
+
+            case "uvw": case "UVW":
+                Console.Write("调试: 直接写入 byte[5] (输入 hex 值, 例如 30 表示 0x30): ");
+                string? hex = Console.ReadLine()?.Trim();
+                if (!string.IsNullOrEmpty(hex))
+                {
+                    if (hex.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) hex = hex[2..];
+                    if (byte.TryParse(hex, System.Globalization.NumberStyles.HexNumber, null, out byte b))
+                        UefiVariable.WriteByte5Raw(b);
+                    else
+                        Console.WriteLine("  ❌ 无效的十六进制值");
+                }
+                break;
+
+            case "srv": MsiApService.PrintStatus(); break;
+            case "srv-install": MsiApService.Install(); break;
+            case "srv-start": MsiApService.Start(); break;
+            case "srv-stop": MsiApService.Stop(); break;
+            case "srv-remove": MsiApService.Uninstall(); break;
+
+            case "unboot": case "UNBOOT":
+                Console.Write("⚠️ 卸载后 WMI ACPI 将不再可用 (除非重装 FM 或重新 boot). 输入 YES 确认: ");
+                if (Console.ReadLine()?.Trim() == "YES")
+                    WmiAcpiBootstrap.Uninstall();
+                else
+                    Console.WriteLine("已取消.");
                 break;
 
             case "snap": case "SNAP":

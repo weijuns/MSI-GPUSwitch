@@ -5,6 +5,62 @@
 > 逆向工程成果: 完全破解 MSI 笔记本 (绝影 14 / Stealth 14) 的 GPU 三模式切换机制,
 > 可脱离 MSI Center 独立完成 Hybrid / Discrete / Eco(iGPU) 切换。
 
+> 🎯 **2026-04-28 重大突破**: 实现**完全脱离 Feature Manager** 的 GPU 切换 (Hybrid → Discrete 已实测成功)。  
+> 详细原理见 [`BREAKTHROUGH.md`](./BREAKTHROUGH.md).
+
+---
+
+## 🔥 完全脱离 Feature Manager 的核心原理 (2026-04-28 突破)
+
+之前以为 Feature Manager 装着了某个 "神秘内核组件", 卸载后 WMI ACPI 永久挂起.  
+**实际上 FM 安装时只做了两件事**:
+
+1. 复制 `msiapcfg.dll` (16KB BMF-in-PE) 到 `C:\Windows\SysWOW64\`
+2. 设置注册表 `HKLM\SYSTEM\CurrentControlSet\Services\WmiAcpi\MofImagePath = %windir%\sysWOW64\msiapcfg.dll`
+
+`msiapcfg.dll` 不是真的 DLL, 是把 BMF (Binary MOF, 含 "FOMB" 魔术字) 包装在 PE 里的"皮". Windows 内置驱动 `wmiacpi.sys` 加载时通过 `MofImagePath` 注册表读它, 把 `MSI_ACPI`/`Package_32` 等 ACPI WMI 类**绑定到 BIOS 的 `_WMI` 方法**. 这一步没做就是 WMI ACPI 调用挂起的根因.
+
+### MSI GPU 切换的完整公式 (无 FM)
+
+```
+1. WMI ACPI 引导  : 复制 msiapcfg.dll + 设置 MofImagePath 注册表 (一次性)
+2. 注册表写入     : FW_GPU_CH = 目标模式, FW_CurrentNewGPU = 任意 ≠ 目标
+3. EC 命令        : Set_Data(0xD1, byte[1] | 0x01)  → Set_Data(0xBE, 0x02)
+4. UEFI 变量      : MsiDCVarData[5] = (byte[5] & 0xFC) | mode_bits
+                    GUID: {DD96BAAF-145E-4F56-B1CF-193256298E99}
+5. 冷启动 (S5→S0) : 必须 [关机+开机], 不能 [重启]!
+                    热重启 EC 不断电, BIOS 跳过 MUX 重配置.
+```
+
+### 实测结果 (绝影 14)
+
+| 方向 | 状态 |
+|---|---|
+| **Hybrid → Discrete** | ✅ 完全成功 (无 FM, 一次冷启动) |
+| **Discrete → Hybrid** | ⚠️ 部分 (BIOS 持久位接受, 硬件 MUX 未执行 — 见 BREAKTHROUGH.md "已知限制") |
+
+### 关键工具命令
+
+```powershell
+MSI GPUSwitch.exe
+  bs       # 检查 wmiacpi.sys MofImagePath 配置
+  boot     # 引导: 复制 msiapcfg.dll + 写注册表 (一次性)
+  uv       # 读 UEFI MsiDCVarData byte[5] 当前 GPU 模式
+  uvw      # 调试: 直接写 byte[5] (输入 hex)
+  gpuD     # Hybrid → Discrete (无 FM 可用)
+  gpuH     # Discrete → Hybrid (持久位变更, MUX 未必同步)
+```
+
+**字节码语义** (UEFI MsiDCVarData byte[5]):
+
+```
+bit 0,1: 用户/MSI 写入的"请求模式"   (00=Hybrid, 01=Discrete, 10=Eco)
+bit 2,3: BIOS POST 后回写的"实际模式" (00=Hybrid, 01=Discrete, 10=Eco)
+bit 4:   isSupport_New_GPU_Switch
+bit 5:   isSupport_UMA_Switch
+bit 6:   isSupport_Discrete_Switch (取反)
+```
+
 ---
 
 ## 目录

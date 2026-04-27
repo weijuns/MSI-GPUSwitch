@@ -1,5 +1,49 @@
 # MSI GPUSwitch 交接文档
 
+**最近更新**: 2026-04-28 — 完成 **完全脱离 Feature Manager 的破解** (单向 Hybrid→Discrete 已实测成功)  
+**详细原理**: 见 [`BREAKTHROUGH.md`](./BREAKTHROUGH.md)
+
+---
+
+## 🎯 2026-04-28 重大突破: 完全脱离 Feature Manager
+
+### 核心发现
+
+之前以为 FM 装着了 "某个神秘内核组件"。实际上 FM 安装时只做了**两件简单的事**:
+1. 复制 `msiapcfg.dll` (16KB BMF-in-PE) 到 `C:\Windows\SysWOW64\`
+2. 设置注册表 `HKLM\SYSTEM\CurrentControlSet\Services\WmiAcpi\MofImagePath`
+
+`msiapcfg.dll` 是 BMF (Binary MOF) 包装在 PE 里. Windows 内置驱动 `wmiacpi.sys` 通过 `MofImagePath` 加载它, 把 `MSI_ACPI`/`Package_32` 等 ACPI WMI 类绑定到 BIOS 的 `_WMI` 方法.
+
+### MSI GPU 切换的真正完整公式
+
+```
+1. WMI ACPI 引导  : msiapcfg.dll → SysWOW64 + MofImagePath 注册表
+2. 注册表         : FW_GPU_CH = 目标模式 + FW_CurrentNewGPU != 目标
+3. EC 写入        : Set_Data(0xD1, byte[1]|=0x01) → Set_Data(0xBE, 0x02)
+4. UEFI 变量      : MsiDCVarData byte[5] bit0/bit1 = 模式编码
+5. 冷启动 (S5→S0) : 必须关机+开机, 不能热重启!
+```
+
+完全不需要 Feature Manager / MSI Center 的任何进程或服务.
+
+### 实测结果 (绝影 14)
+
+| 方向 | 状态 |
+|---|---|
+| **Hybrid → Discrete** | ✅ 完全成功 (无 FM, 一次冷启动) |
+| **Discrete → Hybrid** | ⚠️ 部分 (BIOS 持久位接受, 硬件 MUX 未执行) — 见 BREAKTHROUGH.md "已知限制" |
+
+### 新增代码
+
+- `WmiAcpiBootstrap.cs` — `bs`/`boot`/`unboot` 命令: 引导 wmiacpi.sys 加载 BMF
+- `UefiVariable.cs` — `uv`/`uvw` 命令: 读写 UEFI MsiDCVarData
+- `MsiApService.cs` — `srv*` 命令: 管理 MSIAPService 服务 (实测可选)
+- `AcpiProbe.cs` `ReplayMsiCenterSwitch` — 集成 UEFI 写入 + 冷启动提示
+- `FeatureManager/msiapcfg.dll` — 16KB BMF, 嵌入资源
+
+---
+
 **日期**: 2026-04-27  
 **作者**: Cascade (AI 辅助开发)
 

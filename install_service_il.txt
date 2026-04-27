@@ -1,0 +1,48 @@
+﻿### CLASS: MSIWMIACPI2.WmiAcpiLib2
+
+=== InstallService() -> Void ===
+  IL_0000: call         System.Reflection.Assembly System.Reflection.Assembly::GetEntryAssembly()
+  IL_0005: callvirt     System.String System.Reflection.Assembly::get_Location()
+  IL_000A: call         System.String System.IO.Path::GetDirectoryName(System.String)
+  IL_000F: ldstr        msiapcfg.dll
+  IL_0014: call         System.String System.IO.Path::Combine(System.String,System.String)
+  IL_0019: stloc.0      
+  IL_001A: ldc.i4.s     41
+  IL_001C: call         System.String System.Environment::GetFolderPath(System.Environment/SpecialFolder)
+  IL_0021: stloc.1      
+  IL_0022: ldloc.0      
+  IL_0023: call         System.Boolean System.IO.File::Exists(System.String)
+  IL_0028: brfalse.s    IL_0064: ldarg.0
+  IL_002A: ldarg.0      
+  IL_002B: ldloc.0      
+  IL_002C: ldloc.1      
+  IL_002D: call         System.Void MSIWMIACPI2.WmiAcpiLib2::XcopyFile(System.String,System.String)
+  IL_0032: ldsfld       Microsoft.Win32.RegistryKey Microsoft.Win32.Registry::LocalMachine
+  IL_0037: ldstr        SYSTEM\CurrentControlSet\Services\WmiAcpi
+  IL_003C: ldc.i4.1     
+  IL_003D: callvirt     Microsoft.Win32.RegistryKey Microsoft.Win32.RegistryKey::OpenSubKey(System.String,System.Boolean)
+  IL_0042: ldstr        MofImagePath
+  IL_0047: ldloc.1      
+  IL_0048: ldstr        msiapcfg.dll
+  IL_004D: call         System.String System.IO.Path::Combine(System.String,System.String)
+  IL_0052: callvirt     System.Void Microsoft.Win32.RegistryKey::SetValue(System.String,System.Object)
+  IL_0057: ldarg.0      
+  IL_0058: ldstr        Installed WMIACPI2 service. Please reboot to activate it.
+  IL_005D: call         System.Void MSIWMIACPI2.WmiAcpiLib2::Log(System.String)
+  IL_0062: br.s         IL_007a: leave.s IL_0095
+  IL_0064: ldarg.0      
+  IL_0065: ldstr        Can not install WMIACPI2 service. Missing file "
+  IL_006A: ldloc.0      
+  IL_006B: ldstr        "
+  IL_0070: call         System.String System.String::Concat(System.String,System.String,System.String)
+  IL_0075: call         System.Void MSIWMIACPI2.WmiAcpiLib2::Log(System.String)
+  IL_007A: leave.s      IL_0095: ret
+  IL_007C: stloc.2      
+  IL_007D: ldarg.0      
+  IL_007E: ldstr        Failed to install WMIACPI2 service. Error:
+  IL_0083: ldloc.2      
+  IL_0084: callvirt     System.String System.Exception::get_Message()
+  IL_0089: call         System.String System.String::Concat(System.String,System.String)
+  IL_008E: call         System.Void MSIWMIACPI2.WmiAcpiLib2::Log(System.String)
+  IL_0093: leave.s      IL_0095: ret
+  IL_0095: ret          
