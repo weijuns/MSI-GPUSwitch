@@ -505,8 +505,10 @@ dotnet build "MSI GPUSwitch\GpuSwitch.csproj" -c Release
 .\MSI GPUSwitch\bin\Release\net8.0-windows\win-x64\MSI GPUSwitch.exe
 ```
 
-> **无需额外安装**: 项目自带 `FeatureManager/` 目录 (包含 `MSIAPService.exe` 和 `Feature Manager Service.exe`),
-> 构建时自动复制到输出目录。下载即用, 不依赖系统已安装的 MSI Feature Manager。
+> **前置依赖**: GPU 切换依赖 MSI 的 WMI ACPI 基础设施, 需要先安装 **Feature Manager** (MSI Center 组件)。
+> 项目根目录包含 `Feature Manager_1.0.2312.2201.exe` 安装包, 也可从 MSI 官网下载 MSI Center。
+> 安装后, WMI ACPI 方法调用才能正常工作; 卸载 FM 会导致 WMI ACPI 永久挂起。
+> 项目自带 `FeatureManager/` 目录 (包含 `MSIAPService.exe` 和 `Feature Manager Service.exe`), 构建时自动复制到输出目录。
 
 ### 命令列表
 
@@ -611,7 +613,13 @@ dotnet build "MSI GPUSwitch\GpuSwitch.csproj" -c Release
 **原因**: YAMDCC 的 `IsMSIServiceRunning` 检测到 MSI Foundation Service 运行后故意崩溃。
 **解决**: 从冲突检测列表中移除 MSI Foundation Service (GPU 切换需要它)。
 
-### 陷阱 5: Set_BIOS / Set_Device 切换无效
+### 陷阱 5: Feature Manager 卸载后 WMI ACPI 永久挂起
+
+**现象**: 卸载 Feature Manager 后, WMI ACPI 方法调用 (Get_AP, Set_Data 等) 永久挂起。
+**原因**: FM 安装时注册了内核级组件或 ACPI BIOS 交互, 卸载时被撤销。mofcomp 注册 MOF schema 无法修复。
+**解决**: **不要卸载 Feature Manager**。如需避免 FM 服务自启, 将 MSI Foundation Service 设为手动启动, 禁用 Micro Star SCM。
+
+### 陷阱 6: Set_BIOS / Set_Device 切换无效
 
 **现象**: 调用 `Set_BIOS(0x02, 0x40)` 或 `Set_Device(0x01, bit6=1)` 后, 寄存器值改变了但重启后不生效。
 **原因**: 这些方法只修改运行时状态, 不触发 BIOS 的 MUX 重配置流程。

@@ -505,8 +505,10 @@ dotnet build "MSI GPUSwitch\GpuSwitch.csproj" -c Release
 ."MSI GPUSwitch\bin\Release\net8.0-windows\win-x64\MSI GPUSwitch.exe"
 ```
 
-> **No extra installation needed**: The project bundles a `FeatureManager/` directory (containing `MSIAPService.exe` and `Feature Manager Service.exe`),
-> which is automatically copied to the output directory during build. Download and use — no dependency on system-installed MSI Feature Manager.
+> **Prerequisite**: GPU switching depends on MSI's WMI ACPI infrastructure, which requires **Feature Manager** (an MSI Center component) to be installed.
+> The project root includes `Feature Manager_1.0.2312.2201.exe` installer, or download MSI Center from MSI's official website.
+> After installation, WMI ACPI method calls work correctly; uninstalling FM causes WMI ACPI to hang permanently.
+> The project bundles a `FeatureManager/` directory (containing `MSIAPService.exe` and `Feature Manager Service.exe`), auto-copied to output during build.
 
 ### Command List
 
@@ -611,7 +613,13 @@ Enter command: gpuE
 **Cause**: YAMDCC's `IsMSIServiceRunning` detects MSI Foundation Service and intentionally crashes.
 **Fix**: Remove MSI Foundation Service from the conflict detection list (GPU switching requires it).
 
-### Pitfall 5: Set_BIOS / Set_Device Switching Doesn't Work
+### Pitfall 5: WMI ACPI Hangs Permanently After Feature Manager Uninstall
+
+**Symptom**: After uninstalling Feature Manager, WMI ACPI method calls (Get_AP, Set_Data, etc.) hang permanently.
+**Cause**: FM installs a kernel-level component or ACPI BIOS interaction during installation, which is removed on uninstall. mofcomp MOF schema registration cannot fix this.
+**Fix**: **Do not uninstall Feature Manager**. To prevent FM services from auto-starting, set MSI Foundation Service to Manual start and disable Micro Star SCM.
+
+### Pitfall 6: Set_BIOS / Set_Device Switching Doesn't Work
 
 **Symptom**: After calling `Set_BIOS(0x02, 0x40)` or `Set_Device(0x01, bit6=1)`, register values change but switching doesn't take effect after reboot.
 **Cause**: These methods only modify runtime state; they don't trigger BIOS MUX reconfiguration.
