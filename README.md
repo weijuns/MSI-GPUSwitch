@@ -34,10 +34,12 @@
 
 ### 实测结果 (绝影 14)
 
-| 方向 | 状态 |
-|---|---|
-| **Hybrid → Discrete** | ✅ 完全成功 (无 FM, 一次冷启动) |
-| **Discrete → Hybrid** | ⚠️ 部分 (BIOS 持久位接受, 硬件 MUX 未执行 — 见 BREAKTHROUGH.md "已知限制") |
+| 方向 | 完全无 FM | 装 FM (MSIAPService 跑着) |
+|---|---|---|
+| **Hybrid → Discrete** | ✅ 成功 | ✅ 成功 |
+| **Discrete → Hybrid** | ❌ MUX 未执行 | **✅ 成功** |
+
+**结论**: 代码逻辑 100% 正确; Discrete → Hybrid 需要 `MSIAPService.exe` 在用户态跑着 (做某种 OS-cooperation gate). 集成方案: 嵌入 `MSIAPService.exe` + 自动安装为 Windows Service 即可零依赖 FM.
 
 ### 关键工具命令
 

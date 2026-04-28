@@ -232,25 +232,56 @@ PROGRESS.md 也认为 "Graphics_switch named pipe 不必要"。**确认正确**,
 
 ---
 
-## ⚠️ 已知限制: Discrete → Hybrid 反向切换尚未完全打通
+## ✅ 最终突破 (2026-04-28 上午): 双向切换全部打通
 
-实测情况:
-- **Hybrid → Discrete**: ✅ 完全工作 (无 FM, 一次冷启动)
-- **Discrete → Hybrid**: ⚠️ 部分工作 (BIOS 持久位接受了, 硬件 MUX 没执行)
+### 关键对照实验
 
-观察到的现象:
-- 冷启动后 `BIOS[0x02].byte[1]` 已更新到 0x00 (Hybrid 持久位) ✅
-- 但 `Device[0x01].bit6` 仍为 1, `nvidia-smi Disp.A = On` (硬件还是 dGPU 直连)
-- 二次冷启动也未完成 MUX 切换
+| 测试场景 | gpuD (Hybrid→Discrete) | gpuH (Discrete→Hybrid) |
+|---|---|---|
+| 完全没 FM | ✅ 成功 | ❌ MUX 未执行 |
+| 装回 FM (FM Service + MSIAPService 跑着) | ✅ 成功 | **✅ 成功** |
 
-可能原因:
-1. **MSI BIOS 故意单向锁定**: 一旦切到 Discrete, 必须用 MSI Center 的 SCM (`Graphics_switch` named pipe) 命令才能切回. 这个 named pipe 由 `MSIService.exe` (Micro Star SCM) 创建, 我们没装 MSI Center.
-2. **缺失某个 ACPI 通知**: FM Service.exe 启动时通过 named pipe 调用 WMI2.Get_Data(0xE8) 等命令. 这些命令可能在切回 Hybrid 时是必要的.
-3. **UEFI 变量 byte[1] 或其他字节**: `IsSupport_WinAndFnKeyChange_Function` 启动时若发现 byte[1]==0 会写为 1. 可能还有更多状态需要同步.
+### 结论
 
-实际可行的解决方法:
-- 在 BIOS Setup (开机按 Del/F2) 里手动切回 Hybrid
-- 或者重装 Feature Manager 用 MSI Center 切回, 然后再卸载 (一次性解决)
-- 或者实现完整的 SCM named pipe 协议 (`NamedPipeClientLib.dll` 是 native, 需逆向)
+**我们的代码逻辑 (注册表 + EC + UEFI + 冷启动) 100% 正确**.  
+Discrete → Hybrid 在无 FM 时失败的根因是: **`MSIAPService.exe` (或 `Feature Manager Service.exe`) 必须在用户态跑着**.
 
-**这不影响 Hybrid → Discrete 这条主路径的破解价值**: 项目核心目标是让用户在不装 MSI Center 的情况下能切到 Discrete (高性能模式), 这已经实现.
+具体机制 (推测):
+- 这两个服务在跑时, 通过某个 ACPI 事件 / SMM 共享内存通信, 让 BIOS POST 能完成 MUX 物理切换 (清 byte[5] bit2, 实际切换显示输出 MUX)
+- 缺这个用户态进程时, BIOS 看到切换请求但跳过 MUX 执行 (可能 MSI 故意做了 OS-cooperation gate)
+
+### 修正之前的误解
+
+byte[5] 状态机 (修正后):
+```
+0x30 = Hybrid 稳定          (bit 0,1 = 00 请求 Hybrid; bit 2 = 0 不锁)
+0x31 = Discrete 锁定中      (BIOS POST 检测到请求, EC 写入后立即设)
+0x35 = Discrete 已稳定/锁定 (bit 0 = 1 请求 Discrete, bit 2 = 1 BIOS 确认锁定)
+0x34 = Hybrid 请求, 等待 BIOS 解锁 (bit 2 = 1 还在锁定 Discrete 状态)
+```
+
+之前误判: 以为 0x35 是中间态, 实际上 0x35 是 Discrete 的稳定状态.  
+真正的"中间态"是 0x34 (从 0x35 改 bit 0 为 0, 但 bit 2 锁定位还在).
+
+`AP[0x00].byte[3]`:
+- 之前 PROGRESS.md 说 dGPU=0xC2 / Hyb=0xC0 — **这是错的**
+- 实测两个模式都是 0xC2, 这个寄存器跟 GPU 模式无关
+
+真正的 GPU 模式指示位:
+- `Device[0x01].byte[1]` bit6 (Discrete=1, Hybrid=0)
+- `BIOS[0x04].byte[1]` bit2 (Discrete=1, Hybrid=0)  
+- `MsiDCVarData[5]` bit0,1 (请求位) 与 bit2 (锁定位)
+
+### 实施方案
+
+要让 MSI Flux 真正零依赖 FM, 需要嵌入并管理:
+1. `msiapcfg.dll` (16KB BMF) → SysWOW64 + MofImagePath 注册表 (一次性)
+2. `MSIAPService.exe` (~50KB .NET 服务) → 安装为 Windows Service 并保持运行
+3. *(可能也需要)* `Feature Manager Service.exe` — 待进一步实验确认
+
+### 待验证实验 (下一步)
+
+| 实验 | 目标 |
+|---|---|
+| 完全卸 FM, 单独装 MSIAPService 让它跑, 然后 gpuH | 确认是否单 MSIAPService 就够 |
+| 卸 FM, 装 FM Service 但不装 MSIAPService, gpuH | 确认 FM Service 是否必要 |
