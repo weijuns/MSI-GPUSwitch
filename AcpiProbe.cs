@@ -564,23 +564,19 @@ internal static class AcpiProbe
         }
         Console.WriteLine("  ✓ WMI ACPI 引导已就绪 (msiapcfg.dll + MofImagePath)");
 
-        // 步骤 2 (可选): 仅作为兜底, 若已存在 MSI Foundation Service 且没运行, 启动它.
-        // 实测: 即使没有这个服务, WMI ACPI 调用也能直接工作, 因为 BMF 已被 wmiacpi.sys 加载.
-        try
+        // 步骤 0pre: 写 OS 在线心跳 (EC 0xD9 bit0 = 1).
+        // 这是 MSIAPService.OnStart 的核心握手 — 让 BIOS 在 POST 时知道 OS 端就绪,
+        // 从而允许 Discrete → Hybrid 这种需要 OS 协作的切换.
+        // 不写心跳的话, gpuD 仍可工作 (Hybrid → Discrete 不需要协作),
+        // 但 gpuH (Discrete → Hybrid) 会被 BIOS 拒绝.
+        Console.WriteLine();
+        if (!WriteOsHeartbeat(verbose: true))
         {
-            using var svc = new System.ServiceProcess.ServiceController("MSI Foundation Service");
-            if (svc.Status != System.ServiceProcess.ServiceControllerStatus.Running)
-            {
-                try
-                {
-                    svc.Start();
-                    svc.WaitForStatus(System.ServiceProcess.ServiceControllerStatus.Running, TimeSpan.FromSeconds(5));
-                    Console.WriteLine("  (兜底) MSI Foundation Service 已启动");
-                }
-                catch { /* 启不起来也不影响 */ }
-            }
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine("  ⚠️ OS 在线心跳写入失败. Discrete → Hybrid 切换可能不会生效, 但会继续尝试.");
+            Console.ResetColor();
         }
-        catch { /* 服务不存在, 完全 OK */ }
+        Console.WriteLine();
 
         DumpGpuRegistryState("切换前注册表状态:");
 
@@ -738,6 +734,68 @@ internal static class AcpiProbe
         Console.WriteLine("       命令行快速关机: shutdown -f -s -t 0");
         Console.ResetColor();
         DumpGpuRegistryState("流程结束时注册表状态 (关机前):");
+    }
+
+    /// <summary>
+    /// 🔑 OS 在线心跳: 模拟 MSIAPService.OnStart 第 2812-2822 行的关键动作.
+    /// 
+    /// 逆向 MSIAPService.exe 发现, 它启动时做的唯一关键 ACPI 调用是:
+    ///     val = Get_Data(217 = 0xD9)[0]
+    ///     Set_Data(0xD9, [val | 0x01])    // 设 bit 0
+    /// 
+    /// 这个 EC 寄存器 0xD9 bit 0 是 BIOS 用来确认 "OS 端 MSI 服务已就绪" 的握手位.
+    /// 没有这个握手, BIOS POST 时会拒绝执行 Discrete → Hybrid 的硬件 MUX 切换
+    /// (Hybrid → Discrete 不需要握手, 因为是 "提升" 路径, 不需要 OS 协作).
+    /// 
+    /// 实现这个调用后, 即使完全没装 Feature Manager / MSIAPService, 也能完成双向切换.
+    /// </summary>
+    public static bool WriteOsHeartbeat(bool verbose = true)
+    {
+        if (verbose)
+        {
+            Console.ForegroundColor = ConsoleColor.Cyan;
+            Console.WriteLine("── 写 OS 在线心跳 (EC 0xD9 bit0) ────────────────");
+            Console.ResetColor();
+            Console.WriteLine("  这是 MSIAPService.OnStart 的关键握手, 让 BIOS 知道 OS 端就绪.");
+            Console.WriteLine("  没有它, Discrete → Hybrid 切换会被 BIOS 拒绝.");
+        }
+
+        try
+        {
+            // 1. 读 EC 0xD9 当前值
+            var pkgIn = new byte[32];
+            pkgIn[0] = 0xD9;
+            byte[]? r = CallGet("Get_Data", pkgIn);
+            if (r is null || r.Length < 2 || r[0] != 0x01)
+            {
+                if (verbose) Console.WriteLine($"  ❌ Get_Data(0xD9) 失败 (ack={(r is { Length: > 0 } ? r[0].ToString("X2") : "null")})");
+                return false;
+            }
+            byte cur = r[1];
+            byte target = (byte)(cur | 0x01);
+            if (verbose)
+                Console.WriteLine($"  当前 EC[0xD9] byte[1] = 0x{cur:X2}; 目标 = 0x{target:X2} (bit0=1)");
+
+            if (cur == target)
+            {
+                if (verbose) Console.WriteLine("  ✓ bit0 已是 1, 无需写入.");
+                return true;
+            }
+
+            // 2. 写回
+            var pkgOut = new byte[32];
+            pkgOut[0] = 0xD9;
+            pkgOut[1] = target;
+            byte[]? wr = CallSet("Set_Data", pkgOut);
+            byte ack = wr is { Length: > 0 } ? wr[0] : (byte)0;
+            if (verbose) Console.WriteLine($"  Set_Data(0xD9) ACK = 0x{ack:X2}  ({(ack == 0x01 ? "成功" : "⚠️ 失败")})");
+            return ack == 0x01;
+        }
+        catch (Exception ex)
+        {
+            if (verbose) Console.WriteLine($"  ❌ 异常: {ex.Message}");
+            return false;
+        }
     }
 
     /// <summary>保存所有 Get_* 的当前 32 字节 dump 到文件, 用于 diff.</summary>

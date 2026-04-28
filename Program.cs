@@ -69,6 +69,7 @@ while (true)
     Console.WriteLine("  [boot]  引导: 复制 msiapcfg.dll + 设置 MofImagePath 注册表");
     Console.WriteLine("  [unboot] 卸载引导: 删除 msiapcfg.dll + 清除注册表");
     Console.WriteLine("  [uv]    读取 UEFI 变量 MsiDCVarData[5] 显示当前持久化的 GPU 模式");
+    Console.WriteLine("  [hb]    🔑 写 OS 在线心跳 (EC 0xD9 bit0=1) — Discrete→Hybrid 切换的关键握手");
     Console.WriteLine();
     Console.WriteLine("  🔧 MSI Foundation Service 管理 (实测切换可能依赖此服务在跑)");
     Console.WriteLine("  [srv]         查看服务状态");
@@ -236,6 +237,10 @@ while (true)
                     WmiAcpiBootstrap.Install();
                 else
                     Console.WriteLine("已取消.");
+                break;
+
+            case "hb": case "HB":
+                AcpiProbe.WriteOsHeartbeat();
                 break;
 
             case "uv": case "UV":
