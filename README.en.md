@@ -5,6 +5,66 @@
 > Reverse-engineering成果: Fully cracked MSI laptop (Stealth 14) GPU triple-mode switching mechanism,
 > enabling standalone Hybrid / Discrete / Eco(iGPU) switching without MSI Center.
 
+> 🎯 **2026-04-28 Breakthrough**: Discovered `msiapcfg.dll + MofImagePath` as the key bootstrap condition for MSI ACPI binding. Verified GPU switching without Feature Manager.
+> 🔥 **2026-05-02 Bidirectional switching fully working**: `Hybrid ↔ Discrete` bidirectional switching all succeeded without Feature Manager! Tool auto-manages MSI auxiliary services (on-demand start/stop, no boot auto-start). See [`BREAKTHROUGH.md`](./BREAKTHROUGH.md) for details.
+
+---
+
+## 🔥 Core Principle: Completely Independent from Feature Manager (2026-04-28 Breakthrough)
+
+Previously it was believed that Feature Manager installed some "mysterious kernel component", and uninstalling FM would permanently hang WMI ACPI.
+**In reality, FM installation only does two things**:
+
+1. Copy `msiapcfg.dll` (16KB BMF-in-PE) to `C:\Windows\SysWOW64\`
+2. Set registry `HKLM\SYSTEM\CurrentControlSet\Services\WmiAcpi\MofImagePath = %windir%\sysWOW64\msiapcfg.dll`
+
+`msiapcfg.dll` is not a real DLL — it's a PE wrapper containing BMF (Binary MOF, with "FOMB" magic bytes). The Windows built-in driver `wmiacpi.sys` loads it via the `MofImagePath` registry key at startup, binding ACPI WMI classes like `MSI_ACPI`/`Package_32` to BIOS `_WMI` methods. **Without this step, WMI ACPI calls hang permanently.**
+
+### Complete GPU Switching Formula (No FM)
+
+```
+1. WMI ACPI Bootstrap : Copy msiapcfg.dll + set MofImagePath registry (one-time)
+2. Registry Write      : FW_GPU_CH = target mode, FW_CurrentNewGPU = any ≠ target
+3. EC Commands         : Set_Data(0xD1, byte[1] | 0x01) → Set_Data(0xBE, 0x02)
+4. UEFI Variable       : MsiDCVarData[5] = (byte[5] & 0xFC) | mode_bits
+                         GUID: {DD96BAAF-145E-4F56-B1CF-193256298E99}
+5. Cold Boot (S5→S0)  : Must [shutdown + power on], NOT [restart]!
+                         Warm reboot keeps EC powered; BIOS skips MUX reconfiguration.
+```
+
+### Test Results (Stealth 14)
+
+| Direction | Fully No FM | With FM (MSIAPService running) | Auto-Auxiliary Mode |
+|---|---|---|---|
+| **Hybrid → Discrete** | ✅ Success | ✅ Success | ✅ Success |
+| **Discrete → Hybrid** | ❌ MUX not executed | **✅ Success** | **✅ Success** |
+
+**Conclusion**: Code logic is 100% correct; Discrete → Hybrid requires `MSIAPService.exe` running in userspace (OS-cooperation gate). The tool integrates auto-management: start MSI auxiliary service on demand, auto-stop after switch, service set to manual start (no boot auto-start).
+
+### Key Tool Commands
+
+```powershell
+MSI GPUSwitch.exe
+  gpuD     # Hybrid → Discrete (auto auxiliary, bidirectional working)
+  gpuH     # Discrete → Hybrid (auto auxiliary, bidirectional working)
+  gpuE     # Hybrid → Eco/iGPU (switch to integrated GPU mode)
+  qs       # Quick view of multiple GPU status bits
+  bs       # Check wmiacpi.sys MofImagePath configuration
+  boot     # Bootstrap: copy msiapcfg.dll + write registry (one-time)
+  uv       # Read UEFI MsiDCVarData byte[5] current GPU mode
+  dbg      # Enter advanced debug mode (all probe/switch commands)
+```
+
+**Byte semantics** (UEFI MsiDCVarData byte[5]):
+
+```
+bit 0,1: User/MSI written "requested mode"   (00=Hybrid, 01=Discrete, 10=Eco)
+bit 2,3: BIOS POST writeback "actual mode"    (00=Hybrid, 01=Discrete, 10=Eco)
+bit 4:   isSupport_New_GPU_Switch
+bit 5:   isSupport_UMA_Switch
+bit 6:   isSupport_Discrete_Switch (inverted)
+```
+
 ---
 
 ## Table of Contents
@@ -363,54 +423,77 @@ k.SetValue("FW_GPU_CH", targetMode);               // Then write target value
 
 ## 7. Complete Switching Procedure (Verified)
 
-The following is a verified GPU mode switching procedure that is fully consistent with MSI Center's behavior:
+The following is the verified GPU mode switching procedure.
 
 ### Prerequisites
 
-1. `MSI Foundation Service` (MSIAPService.exe) is running
-2. `Feature Manager Service.exe` is running
+1. WMI ACPI is bootstrapped (one-time `boot` command, no Feature Manager installation needed)
+2. MSI auxiliary services are ready (auto-managed by the tool, no manual operation needed)
+
+> **Note**: Updated 2026-05-02, the tool now integrates MSI auxiliary service auto-management:
+> - Start MSIAPService on demand (needed for Discrete → Hybrid direction, OS-cooperation gate)
+> - Auto-cleanup after switch (`CleanupMsiHelpers()`: Kill FM Service + stop MSIAPService)
+> - Service set to `start=demand` (manual start, no boot auto-start)
 
 ### Switching Steps
 
 ```
-Step 0: Write registry
+Step 0: Auto-prepare auxiliary services (on demand)
+  → Check MSIAPService, start if not running
+  → Check Feature Manager Service.exe, start if not running
+
+Step 1: Write registry
   a) Read current FW_GPU_CH value → use as FW_CurrentNewGPU
      (If it happens to equal the target, set it to another value to ensure they differ)
   b) Write FW_CurrentNewGPU = current value (ensure it differs from target)
   c) Write FW_GPU_CH = target mode (0=Hybrid, 1=Discrete, 2=Eco)
 
-Step 1: Read current AP status
+Step 2: Write UEFI variable
+  → Read MsiDCVarData (GUID: {DD96BAAF-145E-4F56-B1CF-193256298E99})
+  → byte[5] = (byte[5] & 0xFC) | mode_bits
+     mode=0 (Hybrid):   bit0=0, bit1=0
+     mode=1 (Discrete): bit0=1
+     mode=2 (Eco):      bit1=1
+  → Write back MsiDCVarData
+
+Step 3: Read current AP status
   → Get_AP(cmd=0x00)
   → Take byte[1]
 
-Step 2: Modify byte[1]
+Step 4: Modify byte[1]
   → Clear bit0, clear bit1, then set bit0=1
   → mod = (orig & ~0x03) | 0x01
 
-Step 3: Write EC register 0xD1
+Step 5: Write EC register 0xD1
   → Set_Data(cmd=0xD1, byte[1]=mod)
   → Check ACK == 0x01
 
-Step 4: Wait for BIOS response
+Step 6: Wait for BIOS response
   → Sleep(2000)
   → Re-read Get_AP(cmd=0x00)
   → Check if byte[2] bit1 is set (BIOS acknowledged)
 
-Step 5: Confirm write
+Step 7: Confirm write
   → Set_Data(cmd=0xBE, byte[1]=0x02)
   → Check ACK == 0x01
 
-Step 6: Prompt user to reboot
-  → After reboot, BIOS reads EC register + registry, configures MUX
+Step 8: Cleanup auxiliary services
+  → Kill Feature Manager Service process
+  → Stop MSIAPService
+  (Prevents FM Service 0xe0434352 crash on shutdown)
+
+Step 9: Prompt user to shutdown
+  → Must cold boot (shutdown + power on), NOT warm reboot!
+  → EC does not lose power on warm reboot; BIOS skips MUX reconfiguration
 ```
 
 ### Flow Diagram
 
 ```
-Write Registry → Get_AP(0) → Modify byte[1] → Set_Data(0xD1) → Wait 2s → Check bit1 → Set_Data(0xBE) → Reboot
-      ↓              ↓              ↓               ↓               ↓           ↓              ↓
-  FW_GPU_CH      Read status    bit0=1         Write EC 0xD1   BIOS proc   BIOS ack      Commit write
-  FW_Current     bit1=0         bit1=0         ACK=0x01        bit1=1?     ACK=0x01      Takes effect
+Auto-aux → Write Reg → UEFI Var → Get_AP(0) → Mod byte[1] → Set_Data(0xD1) → Wait 2s → Set_Data(0xBE) → Cleanup → Shutdown
+   ↓          ↓           ↓          ↓           ↓              ↓                ↓          ↓              ↓          ↓
+ Start      FW_GPU_CH   byte[5]    Read      bit0=1         Write EC        BIOS proc   Commit       Kill FM     Cold
+ MSIAPSvc   FW_Current  Mode bits  bit1=0    bit1=0         ACK=0x01        bit1=1?     ACK=0x01     Services    Boot
 ```
 
 ---
@@ -505,9 +588,8 @@ dotnet build "MSI GPUSwitch\GpuSwitch.csproj" -c Release
 ."MSI GPUSwitch\bin\Release\net8.0-windows\win-x64\MSI GPUSwitch.exe"
 ```
 
-> **Prerequisite**: GPU switching depends on MSI's WMI ACPI infrastructure, which requires **Feature Manager** (an MSI Center component) to be installed.
-> The project root includes `Feature Manager_1.0.2312.2201.exe` installer, or download MSI Center from MSI's official website.
-> After installation, WMI ACPI method calls work correctly; uninstalling FM causes WMI ACPI to hang permanently.
+> **Prerequisite**: First-time use requires running the `boot` command to complete WMI ACPI bootstrap (one-time operation, requires admin privileges).
+> This command automatically copies `msiapcfg.dll` and sets the `MofImagePath` registry — no Feature Manager installation needed.
 > The project bundles a `FeatureManager/` directory (containing `MSIAPService.exe` and `Feature Manager Service.exe`), auto-copied to output during build.
 
 ### Command List
@@ -564,13 +646,16 @@ Advanced Debug Mode (enter with `dbg`):
 Enter command: gpuE
 
 ── 🎯 GPU switch to Eco/iGPU Mode ──
-  ✓ MSI Foundation Service is running
-  ✓ Feature Manager Service.exe is running
+  ✓ MSI Foundation Service is running (auto-started on demand)
+  ✓ Feature Manager Service.exe is running (auto-started on demand)
   Pre-switch registry state:
     FW_GPU_CH        = 0
     FW_CurrentNewGPU = 1
   Step 0a: Registry FW_CurrentNewGPU: 1 -> 0 (current actual mode)
   Step 0b: Registry FW_GPU_CH: 0 -> 2 (target mode)
+  ── Commit UEFI variable MsiDCVarData ──
+     byte[5]: 0x30 -> 0x32 (mode=2)
+     ✓ UEFI variable written
   Step 1: Get_AP(0) = 01 00 02 ...
   Step 2: Modify byte[1]: 0x00 -> 0x01 (bit0=1, bit1=0)
   ⚠️ This will write to EC register 0xD1. Type YES to continue:
@@ -579,7 +664,8 @@ Enter command: gpuE
   Step 5: Waiting 2 seconds...
           byte[2] bit1 = 1 (BIOS acknowledged)
   Step 6: Set_Data(0xBE) ACK=0x01
-  ✓ Write procedure complete. Please reboot to apply GPU MUX switch.
+  Cleanup: FM Service process terminated, MSIAPService stopped
+  ✓ Write procedure complete. Please shutdown and power on (cold boot, not restart).
 ```
 
 ---
@@ -602,12 +688,12 @@ Enter command: gpuE
 
 | Source Mode | Target Mode | FW_GPU_CH | Result |
 |---|---|---|---|
-| Hybrid | Discrete | 0→1 | ✅ Effective after reboot |
-| Discrete | Hybrid | 1→0 | ✅ Effective after reboot |
-| Hybrid | Eco/iGPU | 0→2 | ✅ Effective after reboot |
-| Discrete | Eco/iGPU | 1→2 | ✅ Effective after reboot |
-| Eco/iGPU | Hybrid | 2→0 | ✅ Effective after reboot |
-| Eco/iGPU | Discrete | 2→1 | ✅ Effective after reboot |
+| Hybrid | Discrete | 0→1 | ✅ Effective after cold boot |
+| Discrete | Hybrid | 1→0 | ✅ Effective after cold boot |
+| Hybrid | Eco/iGPU | 0→2 | ✅ Effective after cold boot |
+| Discrete | Eco/iGPU | 1→2 | ✅ Effective after cold boot |
+| Eco/iGPU | Hybrid | 2→0 | ✅ Effective after cold boot |
+| Eco/iGPU | Discrete | 2→1 | ✅ Effective after cold boot |
 
 ### MSI Auxiliary Service Management Tests
 
@@ -660,8 +746,9 @@ Enter command: gpuE
 ### Pitfall 5: WMI ACPI Hangs Permanently After Feature Manager Uninstall
 
 **Symptom**: After uninstalling Feature Manager, WMI ACPI method calls (Get_AP, Set_Data, etc.) hang permanently.
-**Cause**: FM installs a kernel-level component or ACPI BIOS interaction during installation, which is removed on uninstall. mofcomp MOF schema registration cannot fix this.
-**Fix**: **Do not uninstall Feature Manager**. To prevent FM services from auto-starting, set MSI Foundation Service to Manual start and disable Micro Star SCM.
+**Cause**: FM installation registered `MofImagePath` + `msiapcfg.dll`; uninstall removes them. Without this BMF, `wmiacpi.sys` does not bind MSI ACPI methods.
+**Fix (Recommended)**: Use the `boot` command for one-click recovery (copies `msiapcfg.dll` + sets `MofImagePath`). No FM installation needed.
+**Alternative**: If you prefer not to use `boot`, set MSI Foundation Service to manual start and disable Micro Star SCM, keeping FM installed.
 
 ### Pitfall 6: Set_BIOS / Set_Device Switching Doesn't Work
 

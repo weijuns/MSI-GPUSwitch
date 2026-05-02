@@ -423,54 +423,77 @@ k.SetValue("FW_GPU_CH", targetMode);               // 再写目标值
 
 ## 7. 完整切换流程 (已验证)
 
-以下是经过实际验证的、与 MSI Center 行为完全一致的 GPU 模式切换流程:
+以下是经过实际验证的 GPU 模式切换流程。
 
 ### 前置条件
 
-1. `MSI Foundation Service` (MSIAPService.exe) 正在运行
-2. `Feature Manager Service.exe` 正在运行
+1. WMI ACPI 已引导 (一次性 `boot` 命令完成, 无需安装 Feature Manager)
+2. MSI 辅助服务已就绪 (工具自动管理, 无需手动操作)
+
+> **注意**: 2026-05-02 更新后, 工具已集成 MSI 辅助服务自动管理:
+> - 按需启动 MSIAPService (Discrete → Hybrid 方向需要, OS-cooperation gate)
+> - 切换完成后自动清理 (`CleanupMsiHelpers()`: Kill FM Service + 停止 MSIAPService)
+> - 服务设为 `start=demand` (手动启动, 开机不自启)
 
 ### 切换步骤
 
 ```
-步骤 0: 写注册表
+步骤 0: 自动准备辅助服务 (按需)
+  → 检查 MSIAPService, 未运行则启动
+  → 检查 Feature Manager Service.exe, 未运行则启动
+
+步骤 1: 写注册表
   a) 读取当前 FW_GPU_CH 的值 → 作为 FW_CurrentNewGPU
      (如果恰好等于目标值, 人为设为其他值, 确保不同)
   b) 写入 FW_CurrentNewGPU = 当前值 (确保与目标不同)
   c) 写入 FW_GPU_CH = 目标模式 (0=Hybrid, 1=Discrete, 2=Eco)
 
-步骤 1: 读取当前 AP 状态
+步骤 2: 写入 UEFI 变量
+  → 读取 MsiDCVarData (GUID: {DD96BAAF-145E-4F56-B1CF-193256298E99})
+  → byte[5] = (byte[5] & 0xFC) | mode_bits
+     mode=0 (Hybrid):   bit0=0, bit1=0
+     mode=1 (Discrete): bit0=1
+     mode=2 (Eco):      bit1=1
+  → 写回 MsiDCVarData
+
+步骤 3: 读取当前 AP 状态
   → Get_AP(cmd=0x00)
   → 取 byte[1]
 
-步骤 2: 修改 byte[1]
+步骤 4: 修改 byte[1]
   → 清 bit0, 清 bit1, 然后置 bit0=1
   → mod = (orig & ~0x03) | 0x01
 
-步骤 3: 写入 EC 寄存器 0xD1
+步骤 5: 写入 EC 寄存器 0xD1
   → Set_Data(cmd=0xD1, byte[1]=mod)
   → 检查 ACK == 0x01
 
-步骤 4: 等待 BIOS 响应
+步骤 6: 等待 BIOS 响应
   → Sleep(2000)
   → 重读 Get_AP(cmd=0x00)
   → 检查 byte[2] bit1 是否置位 (BIOS 已确认)
 
-步骤 5: 确认写入
+步骤 7: 确认写入
   → Set_Data(cmd=0xBE, byte[1]=0x02)
   → 检查 ACK == 0x01
 
-步骤 6: 提示用户重启
-  → 重启后 BIOS 读取 EC 寄存器 + 注册表, 配置 MUX
+步骤 8: 清理辅助服务
+  → Kill Feature Manager Service 进程
+  → 停止 MSIAPService
+  (避免关机时 FM Service 抛出 0xe0434352 崩溃)
+
+步骤 9: 提示用户关机
+  → 必须冷启动 (关机+开机), 不能热重启!
+  → EC 不断电时 BIOS 不应用 MUX 切换
 ```
 
 ### 流程图
 
 ```
-写注册表 → Get_AP(0) → 改 byte[1] → Set_Data(0xD1) → 等2s → 检查bit1 → Set_Data(0xBE) → 重启
-   ↓           ↓            ↓            ↓                ↓          ↓            ↓
- FW_GPU_CH   读状态     bit0=1      写EC 0xD1       BIOS处理   BIOS确认     提交写入
- FW_Current  bit1=0     bit1=0      ACK=0x01        bit1=1?    ACK=0x01     生效
+自动辅助 → 写注册表 → UEFI变量 → Get_AP(0) → 改byte[1] → Set_Data(0xD1) → 等2s → Set_Data(0xBE) → 清理 → 关机
+   ↓          ↓          ↓          ↓           ↓            ↓               ↓          ↓            ↓       ↓
+ 启MSIAP   FW_GPU_CH  byte[5]    读状态     bit0=1       写EC 0xD1      BIOS处理   确认写入     Kill    冷启动
+ 启FM Svc  FW_Current  模式位    bit1=0     bit1=0       ACK=0x01       bit1=1?    ACK=0x01    服务    生效
 ```
 
 ---
@@ -565,9 +588,8 @@ dotnet build "MSI GPUSwitch\GpuSwitch.csproj" -c Release
 .\MSI GPUSwitch\bin\Release\net8.0-windows\win-x64\MSI GPUSwitch.exe
 ```
 
-> **前置依赖**: GPU 切换依赖 MSI 的 WMI ACPI 基础设施, 需要先安装 **Feature Manager** (MSI Center 组件)。
-> 项目根目录包含 `Feature Manager_1.0.2312.2201.exe` 安装包, 也可从 MSI 官网下载 MSI Center。
-> 安装后, WMI ACPI 方法调用才能正常工作; 卸载 FM 会导致 WMI ACPI 永久挂起。
+> **前置依赖**: 首次使用需运行 `boot` 命令完成 WMI ACPI 引导 (一次性操作, 需管理员权限)。
+> 该命令会自动复制 `msiapcfg.dll` 并设置 `MofImagePath` 注册表, 无需安装 Feature Manager。
 > 项目自带 `FeatureManager/` 目录 (包含 `MSIAPService.exe` 和 `Feature Manager Service.exe`), 构建时自动复制到输出目录。
 
 ### 命令列表
@@ -624,13 +646,16 @@ dotnet build "MSI GPUSwitch\GpuSwitch.csproj" -c Release
 输入编号并回车: gpuE
 
 ── 🎯 GPU 切换到 核显模式 (Eco/iGPU) ──
-  ✓ MSI Foundation Service 已在运行
-  ✓ Feature Manager Service.exe 已在运行
+  ✓ MSI Foundation Service 已在运行 (按需启动)
+  ✓ Feature Manager Service.exe 已在运行 (按需启动)
   切换前注册表状态:
     FW_GPU_CH        = 0
     FW_CurrentNewGPU = 1
   步骤 0a: 注册表 FW_CurrentNewGPU: 1 -> 0 (当前实际模式)
   步骤 0b: 注册表 FW_GPU_CH: 0 -> 2 (目标模式)
+  ── 提交 UEFI 变量 MsiDCVarData ──
+     byte[5]: 0x30 -> 0x32 (mode=2)
+     ✓ UEFI 变量已写入
   步骤 1: Get_AP(0) = 01 00 02 ...
   步骤 2: 改 byte[1]: 0x00 -> 0x01 (bit0=1, bit1=0)
   ⚠️ 此操作会真正写入 EC 寄存器 0xD1, 输入 YES 继续:
@@ -639,7 +664,8 @@ dotnet build "MSI GPUSwitch\GpuSwitch.csproj" -c Release
   步骤 5: 等待 2 秒...
           byte[2] bit1 = 1 (BIOS 已确认)
   步骤 6: Set_Data(0xBE) ACK=0x01
-  ✓ 写入流程完成. 请重启电脑使 GPU MUX 切换生效.
+  清理: FM Service 进程已终止, MSIAPService 已停止
+  ✓ 写入流程完成. 请关机后重新开机 (冷启动, 非重启).
 ```
 
 ---
@@ -662,12 +688,12 @@ dotnet build "MSI GPUSwitch\GpuSwitch.csproj" -c Release
 
 | 源模式 | 目标模式 | FW_GPU_CH | 结果 |
 |---|---|---|---|
-| Hybrid | Discrete | 0→1 | ✅ 重启后生效 |
-| Discrete | Hybrid | 1→0 | ✅ 重启后生效 |
-| Hybrid | Eco/iGPU | 0→2 | ✅ 重启后生效 |
-| Discrete | Eco/iGPU | 1→2 | ✅ 重启后生效 |
-| Eco/iGPU | Hybrid | 2→0 | ✅ 重启后生效 |
-| Eco/iGPU | Discrete | 2→1 | ✅ 重启后生效 |
+| Hybrid | Discrete | 0→1 | ✅ 冷启动后生效 |
+| Discrete | Hybrid | 1→0 | ✅ 冷启动后生效 |
+| Hybrid | Eco/iGPU | 0→2 | ✅ 冷启动后生效 |
+| Discrete | Eco/iGPU | 1→2 | ✅ 冷启动后生效 |
+| Eco/iGPU | Hybrid | 2→0 | ✅ 冷启动后生效 |
+| Eco/iGPU | Discrete | 2→1 | ✅ 冷启动后生效 |
 
 ### MSI 辅助服务管理测试
 
@@ -720,8 +746,9 @@ dotnet build "MSI GPUSwitch\GpuSwitch.csproj" -c Release
 ### 陷阱 5: Feature Manager 卸载后 WMI ACPI 永久挂起
 
 **现象**: 卸载 Feature Manager 后, WMI ACPI 方法调用 (Get_AP, Set_Data 等) 永久挂起。
-**原因**: FM 安装时注册了内核级组件或 ACPI BIOS 交互, 卸载时被撤销。mofcomp 注册 MOF schema 无法修复。
-**解决**: **不要卸载 Feature Manager**。如需避免 FM 服务自启, 将 MSI Foundation Service 设为手动启动, 禁用 Micro Star SCM。
+**原因**: FM 安装时注册了 `MofImagePath` + `msiapcfg.dll`, 卸载时被删除。没有这个 BMF, `wmiacpi.sys` 不会绑定 MSI ACPI 方法。
+**解决 (推荐)**: 使用 `boot` 命令一键恢复 (复制 `msiapcfg.dll` + 设置 `MofImagePath`), 无需安装 FM。
+**或者**: 如果不想用 `boot`, 将 MSI Foundation Service 设为手动启动、禁用 Micro Star SCM, 保留 FM 不卸载。
 
 ### 陷阱 6: Set_BIOS / Set_Device 切换无效
 
