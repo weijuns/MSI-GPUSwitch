@@ -528,29 +528,24 @@ internal static class AcpiProbe
         Console.WriteLine($"── 🎯 GPU 切换到 {target} ──");
         Console.ResetColor();
 
-        // === 前置: 启动 MSI 后台服务 ===
-        // 经测试验证: GPU 切换需要两个进程配合:
-        //   1. MSIAPService.exe (MSI Foundation Service) - 必须先启动
-        //   2. Feature Manager Service.exe - 依赖 MSIAPService, 单独运行会立即退出
-        // 不需要 Feature Manager UI, 不需要 Micro Star SCM.
+        // === 前置检查: 先把能自动做的都自动做掉 ===
+        // 1) WMI ACPI 引导必须就绪 (msiapcfg.dll + MofImagePath)
+        // 2) 若可找到 MSIAPService / FM Service, 则尝试自动安装/启动
+        // 3) 再执行注册表 + EC + UEFI 流程
 
-        // 查找 FeatureManager 目录: 优先项目自带, 其次系统安装
         string exeDir = AppContext.BaseDirectory;
         string[] fmDirCandidates =
         {
-            @"C:\ProgramData\MSI Flux\FeatureManager",                                          // Auto-extracted by MSI Flux
-            System.IO.Path.GetFullPath(System.IO.Path.Combine(exeDir, "FeatureManager")),       // Bundled with MSI GPUSwitch
-            @"C:\Program Files (x86)\Feature Manager",                                           // System install
+            @"C:\ProgramData\MSI Flux\FeatureManager",
+            System.IO.Path.GetFullPath(System.IO.Path.Combine(exeDir, "FeatureManager")),
+            @"C:\Program Files (x86)\Feature Manager",
         };
-        string fmDir = fmDirCandidates.FirstOrDefault(d => System.IO.File.Exists(System.IO.Path.Combine(d, "MSIAPService.exe")))
-            ?? fmDirCandidates[0];
-        string msiApSvcPath = System.IO.Path.Combine(fmDir, "MSIAPService.exe");
-        string fmSvcPath = System.IO.Path.Combine(fmDir, "Feature Manager Service.exe");
-        Console.WriteLine($"  FeatureManager 目录: {fmDir}");
+        string? fmDir = fmDirCandidates.FirstOrDefault(d => System.IO.File.Exists(System.IO.Path.Combine(d, "MSIAPService.exe")));
+        if (fmDir is not null)
+            Console.WriteLine($"  FeatureManager 目录: {fmDir}");
+        else
+            Console.WriteLine("  FeatureManager 目录: <未找到可用副本>");
 
-        // 步骤 1: 检查 WMI ACPI 引导状态 (msiapcfg.dll + MofImagePath)
-        // 这是 GPU 切换的真正前置条件 — 不需要任何 MSI 进程/服务在跑.
-        // 详见 BREAKTHROUGH.md: 唯一真正必要的就是 wmiacpi.sys 能加载 MSI 的 BMF.
         var bootStatus = WmiAcpiBootstrap.Check();
         if (!bootStatus.IsFullyConfigured)
         {
@@ -564,16 +559,18 @@ internal static class AcpiProbe
         }
         Console.WriteLine("  ✓ WMI ACPI 引导已就绪 (msiapcfg.dll + MofImagePath)");
 
-        // 步骤 0pre: 写 OS 在线心跳 (EC 0xD9 bit0 = 1).
-        // 这是 MSIAPService.OnStart 的核心握手 — 让 BIOS 在 POST 时知道 OS 端就绪,
-        // 从而允许 Discrete → Hybrid 这种需要 OS 协作的切换.
-        // 不写心跳的话, gpuD 仍可工作 (Hybrid → Discrete 不需要协作),
-        // 但 gpuH (Discrete → Hybrid) 会被 BIOS 拒绝.
+        if (!TryEnsureMsiHelpersRunning(fmDir))
+        {
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine("  ⚠️ MSI 辅助进程未全部启动成功, 将继续执行切换流程.");
+            Console.ResetColor();
+        }
+
         Console.WriteLine();
         if (!WriteOsHeartbeat(verbose: true))
         {
             Console.ForegroundColor = ConsoleColor.Yellow;
-            Console.WriteLine("  ⚠️ OS 在线心跳写入失败. Discrete → Hybrid 切换可能不会生效, 但会继续尝试.");
+            Console.WriteLine("  ⚠️ OS 在线心跳写入失败, 继续尝试切换.");
             Console.ResetColor();
         }
         Console.WriteLine();
@@ -720,20 +717,56 @@ internal static class AcpiProbe
             Console.WriteLine("  ❌ UEFI 变量写入失败. GPU MUX 切换可能不会生效.");
             Console.WriteLine("     请确保以管理员身份运行, 并且系统支持 UEFI 固件变量.");
             Console.ResetColor();
+            return;
+        }
+
+        // 回切方向更依赖 OS/MSI 协作，因此在提交固件变量后，再补一次心跳和服务状态确认，
+        // 让 Discrete -> Hybrid 和 Hybrid -> Discrete 的行为尽量对齐 MSI Center。
+        if (targetMode == 0)
+        {
+            Console.WriteLine();
+            Console.WriteLine("  步骤 8: 回切到 Hybrid，补写 OS 在线心跳并确认 MSI 辅助组件状态...");
+            WriteOsHeartbeat(verbose: true);
+            TryEnsureMsiHelpersRunning(fmDir);
         }
 
         Console.WriteLine();
         Console.ForegroundColor = ConsoleColor.Green;
         Console.WriteLine("  ✓ 写入流程完成.");
+        if (targetMode == 0)
+        {
+            Console.WriteLine("  ✓ 已对 Hybrid 回切路径额外补齐心跳/服务协同动作.");
+        }
+
+        Console.WriteLine();
+        Console.WriteLine("  清理 MSI 辅助组件 (避免关机时 FM Service 崩溃弹窗)...");
+        CleanupMsiHelpers();
+
         Console.WriteLine();
         Console.ForegroundColor = ConsoleColor.Yellow;
         Console.WriteLine("  ⚠️  关键: 必须 [关机] 然后 [开机], 不能用 [重启]!");
         Console.WriteLine("       热重启时 EC 不断电, BIOS 不会执行 MUX 切换.");
         Console.WriteLine("       冷启动 (S5→S0) 才会让 BIOS POST 应用 GPU MUX.");
-        Console.WriteLine();
-        Console.WriteLine("       命令行快速关机: shutdown -f -s -t 0");
         Console.ResetColor();
         DumpGpuRegistryState("流程结束时注册表状态 (关机前):");
+
+        Console.WriteLine();
+        Console.ForegroundColor = ConsoleColor.Yellow;
+        Console.WriteLine("  是否立即关机? 输入 YES 执行 shutdown -f -s -t 0, 其它任意输入跳过:");
+        Console.ResetColor();
+        Console.Write("  > ");
+        if (Console.ReadLine()?.Trim() == "YES")
+        {
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine("  正在执行关机...");
+            Console.ResetColor();
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("shutdown")
+            {
+                Arguments = "-f -s -t 0",
+                CreateNoWindow = true,
+                UseShellExecute = false,
+            });
+        }
     }
 
     /// <summary>
@@ -749,6 +782,116 @@ internal static class AcpiProbe
     /// 
     /// 实现这个调用后, 即使完全没装 Feature Manager / MSIAPService, 也能完成双向切换.
     /// </summary>
+    private static bool TryEnsureMsiHelpersRunning(string? fmDir)
+    {
+        bool anyFound = false;
+        bool allReady = true;
+
+        foreach (string path in EnumerateHelperExecutables(fmDir))
+        {
+            anyFound = true;
+
+            if (TryStartHelper(path))
+                continue;
+
+            // MSIAPService.exe 这一路如果只是“文件在，但服务没注册”，
+            // 先尝试安装再启动，避免自动切换流程卡在手工服务准备上。
+            if (LooksLikeMsiFoundationService(path))
+            {
+                Console.WriteLine("    ↳ 尝试自动安装 MSI Foundation Service...");
+                if (MsiApService.Install() && MsiApService.StartIfInstalled())
+                    continue;
+            }
+
+            allReady = false;
+        }
+
+        return anyFound ? allReady : true;
+    }
+
+    private static void CleanupMsiHelpers()
+    {
+        foreach (var proc in System.Diagnostics.Process.GetProcessesByName("Feature Manager Service"))
+        {
+            try { proc.Kill(); proc.WaitForExit(3000); Console.WriteLine("    ✓ 已终止 Feature Manager Service.exe"); }
+            catch (Exception ex) { Console.WriteLine($"    ⚠️ 终止 FM Service 失败: {ex.Message}"); }
+        }
+
+        if (MsiApService.IsRegistered())
+        {
+            try { MsiApService.Stop(); }
+            catch { }
+        }
+    }
+
+    private static bool LooksLikeMsiFoundationService(string exePath)
+    {
+        string fileName = System.IO.Path.GetFileName(exePath);
+        return string.Equals(fileName, "MSIAPService.exe", StringComparison.OrdinalIgnoreCase) ||
+               fileName.Contains("MSIAPService", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static IEnumerable<string> EnumerateHelperExecutables(string? fmDir)
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var dir in GetHelperDirectories(fmDir))
+        {
+            foreach (var name in new[] { "MSIAPService.exe", "Feature Manager Service.exe" })
+            {
+                string path = System.IO.Path.Combine(dir, name);
+                if (System.IO.File.Exists(path) && seen.Add(path))
+                    yield return path;
+            }
+        }
+    }
+
+    private static IEnumerable<string> GetHelperDirectories(string? fmDir)
+    {
+        if (!string.IsNullOrWhiteSpace(fmDir)) yield return fmDir;
+        string baseDir = AppContext.BaseDirectory;
+        yield return System.IO.Path.GetFullPath(System.IO.Path.Combine(baseDir, "FeatureManager"));
+        yield return @"C:\ProgramData\MSI Flux\FeatureManager";
+        yield return @"C:\Program Files (x86)\Feature Manager";
+    }
+
+    private static bool TryStartHelper(string exePath)
+    {
+        try
+        {
+            string fileName = System.IO.Path.GetFileName(exePath);
+            Console.WriteLine($"  尝试启动: {fileName}");
+
+            if (string.Equals(fileName, MsiApService.ServiceName, StringComparison.OrdinalIgnoreCase) ||
+                fileName.Contains("MSIAPService", StringComparison.OrdinalIgnoreCase))
+            {
+                bool ok = MsiApService.StartIfInstalled();
+                Console.WriteLine(ok ? "    ✓ MSI Foundation Service 已处理" : "    ⚠️ MSI Foundation Service 未注册或启动失败");
+                return ok;
+            }
+
+            var psi = new System.Diagnostics.ProcessStartInfo(exePath)
+            {
+                UseShellExecute = true,
+                WorkingDirectory = System.IO.Path.GetDirectoryName(exePath) ?? AppContext.BaseDirectory,
+                WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden,
+            };
+            using var p = System.Diagnostics.Process.Start(psi);
+            if (p is null)
+            {
+                Console.WriteLine($"    ❌ 启动失败: {fileName}");
+                return false;
+            }
+            System.Threading.Thread.Sleep(1000);
+            Console.WriteLine($"    ✓ 已请求启动: {fileName}");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"    ⚠️ 启动 {System.IO.Path.GetFileName(exePath)} 失败: {ex.Message}");
+            return false;
+        }
+    }
+
     public static bool WriteOsHeartbeat(bool verbose = true)
     {
         if (verbose)
@@ -757,7 +900,7 @@ internal static class AcpiProbe
             Console.WriteLine("── 写 OS 在线心跳 (EC 0xD9 bit0) ────────────────");
             Console.ResetColor();
             Console.WriteLine("  这是 MSIAPService.OnStart 的关键握手, 让 BIOS 知道 OS 端就绪.");
-            Console.WriteLine("  没有它, Discrete → Hybrid 切换会被 BIOS 拒绝.");
+            Console.WriteLine("  若心跳失败, 仍会继续尝试切换.");
         }
 
         try
@@ -782,7 +925,6 @@ internal static class AcpiProbe
                 return true;
             }
 
-            // 2. 写回
             var pkgOut = new byte[32];
             pkgOut[0] = 0xD9;
             pkgOut[1] = target;

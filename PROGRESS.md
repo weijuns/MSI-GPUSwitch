@@ -1,26 +1,32 @@
 # GPU Switch 完全破解
 
-## 🎉 状态: 完全成功 (2026-04-26)
+## 🎉 状态: 全部成功 (2026-04-26 / 2026-04-28 / 2026-05-02)
 
-经过反编译 Feature_Manager.exe 和大量测试, 我们完全复刻了 MSI 的 GPU 切换机制.
-**GpuSwitch.exe 可以独立完成 Hybrid ↔ Discrete 双向切换, 不需要 Feature Manager UI.**
+经过反编译 Feature_Manager.exe、`MSIWMIACPI2.dll` 以及大量测试, 我们已经完全复刻了 MSI 的 GPU 切换机制.
+
+**2026-05-02 更新**: Hybrid ↔ Discrete 双向切换全部打通! 工具已集成 MSI 辅助服务自动管理:
+- 按需启动 MSIAPService (OS-cooperation gate)
+- 切换完成后自动停止 + Kill FM Service (避免关机崩溃 0xe0434352)
+- 服务设为手动启动 (开机不自启)
+- 菜单精简: 主页显示核心功能, 调试命令通过 `dbg` 子菜单访问
 
 ## 最终切换公式
 
-**前置条件:** 两个 MSI 后台服务必须运行:
-1. `MSI Foundation Service` (MSIAPService.exe) — Windows 服务, 必须先启动
-2. `Feature Manager Service.exe` — 依赖 MSIAPService, 单独运行会立即退出
+**前置条件:** WMI ACPI 已引导 (一次性 `boot` 命令完成)
 
 **切换步骤:**
-1. 启动 `MSI Foundation Service` 服务
-2. 启动 `Feature Manager Service.exe` 进程
+1. 检查并按需启动 MSIAPService (自动管理, 无需手动操作)
+2. 检查并按需启动 Feature Manager Service.exe 进程
 3. 写注册表 `FW_CurrentNewGPU` = 当前实际模式 (目标的反值, 确保与 FW_GPU_CH 不同)
-4. 写注册表 `FW_GPU_CH` = 目标模式 (1=Discrete, 0=Hybrid)
-5. `Get_AP(0)` → 取 byte[1], 改 bit0=1, bit1=0
-6. `Set_Data(0xD1, [修改后的byte])` — 写 EC 寄存器
-7. 等 2 秒, 重读 `Get_AP(0)` 检查 byte[2] bit1 (BIOS 置位)
-8. `Set_Data(0xBE, [0x02])` — 确认写入
-9. 重启电脑
+4. 写注册表 `FW_GPU_CH` = 目标模式 (1=Discrete, 0=Hybrid, 2=Eco/iGPU)
+5. 写 UEFI 变量 MsiDCVarData byte[5] bit0/bit1 = 模式编码
+6. `Get_AP(0)` → 取 byte[1], 改 bit0=1, bit1=0
+7. `Set_Data(0xD1, [修改后的byte])` — 写 EC 寄存器
+8. 等 2 秒, 重读 `Get_AP(0)` 检查 byte[2] bit1 (BIOS 置位)
+9. `Set_Data(0xBE, [0x02])` — 确认写入
+10. 清理: Kill FM Service 进程 + 停止 MSIAPService
+11. 提示用户是否关机 (shutdown -f -s -t 0)
+12. 关机后重新开机, BIOS POST 应用 MUX 切换
 
 ## 核心原理
 

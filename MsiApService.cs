@@ -41,17 +41,41 @@ internal static class MsiApService
     {
         Console.WriteLine("── MSI Foundation Service 状态 ────────────────────");
         Console.WriteLine($"  exe 路径: {FindMsiApServiceExe() ?? "(找不到)"}");
+        Console.WriteLine($"  服务已注册: {(IsRegistered() ? "✅" : "❌ (未注册)")}");
         try
         {
             using var sc = new ServiceController(ServiceName);
-            Console.WriteLine($"  服务已注册: ✅");
             Console.WriteLine($"  当前状态: {sc.Status}");
             Console.WriteLine($"  启动类型: {sc.StartType}");
         }
         catch (InvalidOperationException)
         {
-            Console.WriteLine($"  服务已注册: ❌ (未注册)");
+            Console.WriteLine("  当前状态: <无法读取>");
         }
+    }
+
+    public static bool IsRegistered()
+    {
+        try
+        {
+            using var sc = new ServiceController(ServiceName);
+            _ = sc.Status;
+            return true;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    public static bool StartIfInstalled()
+    {
+        if (!IsRegistered()) return false;
+        return Start();
     }
 
     public static bool Install()
@@ -88,6 +112,25 @@ internal static class MsiApService
             Console.WriteLine($"  stderr: {stderr}");
             return false;
         }
+
+        try
+        {
+            var sc = new ProcessStartInfo("sc.exe")
+            {
+                Arguments = $"config \"{ServiceName}\" start=demand",
+                CreateNoWindow = true,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+            };
+            using var cp = Process.Start(sc)!;
+            cp.WaitForExit(5000);
+            if (cp.ExitCode == 0)
+                Console.WriteLine("  ✓ 已设为手动启动 (开机不会自启)");
+            else
+                Console.WriteLine("  ⚠️ 设置手动启动失败, 服务可能开机自启");
+        }
+        catch { Console.WriteLine("  ⚠️ 设置手动启动失败"); }
+
         Console.WriteLine("  ✓ 安装完成");
         return true;
     }

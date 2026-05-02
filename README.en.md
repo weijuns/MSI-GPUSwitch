@@ -512,20 +512,51 @@ dotnet build "MSI GPUSwitch\GpuSwitch.csproj" -c Release
 
 ### Command List
 
+Main Menu:
+
 | Command | Function |
 |---|---|
-| `gpuD` | Switch to Discrete Only (dGPU) |
-| `gpuH` | Switch to Hybrid Output (MSHybrid) |
-| `gpuE` | Switch to Eco/iGPU Only |
+| `gpuD` | Switch to Discrete Only (dGPU), auto auxiliary services + shutdown prompt |
+| `gpuH` | Switch to Hybrid Output (MSHybrid), auto auxiliary services + shutdown prompt |
+| `gpuE` | Switch to Eco/iGPU Only, auto auxiliary services + shutdown prompt |
 | `qs` | Quick view of 7 GPU status bits |
-| `r` | Full GPU mode status read |
-| `snap` | Save full status snapshot to snapshot.txt |
+| `uv` | Read UEFI variable MsiDCVarData (persistent GPU mode) |
+| `bs` | Check WMI ACPI bootstrap status |
+| `boot` | Bootstrap: copy msiapcfg.dll + set MofImagePath registry |
+| `dbg` | Enter advanced debug mode (all probe/switch commands preserved) |
+| `0` | Exit |
+
+Advanced Debug Mode (enter with `dbg`):
+
+| Command | Function |
+|---|---|
+| `1` | Display system info (model/BIOS/GPU) |
+| `2` | Enumerate all MSI_* classes under root\wmi |
+| `3` | Enumerate GPU-related classes under root\cimv2 |
+| `4` | Dump all instances of a specified WMI class |
+| `5` | Dump all method signatures of a specified WMI class |
+| `6` | One-click full dump (writes to dump.txt) |
 | `7` | Call Get_WMI (list supported data blocks) |
 | `8` | Bulk probe Get_* / cmd 0x00~0x20 |
 | `9` | Manually call any Get_* method |
 | `p` | Describe Package_32 class definition |
 | `q` | Scan all Get_* × cmd with Package_32 |
-| `0` | Exit |
+| `r` | Full GPU mode status read |
+| `snap` | Save full status snapshot to snapshot.txt |
+| `d` | One-click full probe + write to acpi_probe.txt |
+| `s1/s0` | Set_BIOS switch to Discrete/Hybrid (legacy method) |
+| `d1/d0` | Set_Device switch to Discrete/Hybrid (legacy method) |
+| `dt1/dt0` | Set_Data cmd=0x04 switch to Discrete/Hybrid |
+| `ap1/ap0` | Set_AP cmd=0x00 switch to Discrete/Hybrid |
+| `b41/b40` | Set_BIOS cmd=0x04 switch to Discrete/Hybrid |
+| `cc` | Dump MSI_CentralControl method signatures |
+| `hb` | Write OS heartbeat (EC 0xD9 bit0) |
+| `uvw` | Debug: directly write UEFI byte[5] |
+| `unboot` | Uninstall bootstrap (delete msiapcfg.dll + clear registry) |
+| `srv` | View MSI Foundation Service status |
+| `srv-install/start/stop/remove` | Service management |
+| `auto` | Auto-prepare MSI auxiliary components and switch GPU |
+| `0` | Return to main menu |
 
 ### Switching Example
 
@@ -564,7 +595,10 @@ Enter command: gpuE
 | 3 | ❌ | ✅ | ❌ | ❌ | ❌ FM Service exits immediately |
 | 4 | ❌ | ❌ | ✅ | ❌ | ✅ FM UI auto-starts services |
 
-### Mode Switch Tests
+### Mode Switch Tests (Updated 2026-05-02)
+
+> **Hybrid ↔ Discrete bidirectional switching fully working!** All 6 directions verified successful.
+> Tool auto-manages MSI auxiliary services (start on demand, stop after switch), prevents FM Service shutdown crash.
 
 | Source Mode | Target Mode | FW_GPU_CH | Result |
 |---|---|---|---|
@@ -574,6 +608,16 @@ Enter command: gpuE
 | Discrete | Eco/iGPU | 1→2 | ✅ Effective after reboot |
 | Eco/iGPU | Hybrid | 2→0 | ✅ Effective after reboot |
 | Eco/iGPU | Discrete | 2→1 | ✅ Effective after reboot |
+
+### MSI Auxiliary Service Management Tests
+
+| Test | Result |
+|---|---|
+| MSIAPService installed as Windows service | ✅ Auto-set to manual start |
+| Auto-start MSIAPService before switch | ✅ On-demand start, no user interference |
+| Auto-stop MSIAPService after switch | ✅ CleanupMsiHelpers() after switch |
+| Auto-terminate FM Service process | ✅ Prevents 0xe0434352 shutdown crash |
+| MSIAPService not auto-starting on boot | ✅ start=demand (manual) |
 
 ### Graphics_switch (SCM) Tests
 
@@ -625,6 +669,18 @@ Enter command: gpuE
 **Cause**: These methods only modify runtime state; they don't trigger BIOS MUX reconfiguration.
 **Fix**: Must use the `Set_Data(0xD1)` + `Set_Data(0xBE)` two-step write procedure.
 
+### Pitfall 7: MSIAPService Auto-Starts on Boot (Unnecessary)
+
+**Symptom**: After installing MSIAPService as a Windows service, it runs in the background on every boot, wasting resources.
+**Cause**: `InstallUtil.exe` registers the service with Automatic start type by default.
+**Fix**: After installation, run `sc.exe config "MSI Foundation Service" start=demand` to set manual start. The tool handles this automatically in `MsiApService.Install()`.
+
+### Pitfall 8: Feature Manager Service.exe Shutdown Crash (0xe0434352)
+
+**Symptom**: After GPU switching, shutting down shows "Feature Manager Service.exe - Application Error" (unknown software exception 0xe0434352). The switch itself succeeds.
+**Cause**: After switching, MSIAPService remains alive; its dependent FM Service process receives a termination signal during Windows shutdown, causing an unhandled .NET CLR exception.
+**Fix**: The tool auto-calls `CleanupMsiHelpers()` after switching: kills the FM Service process, then stops MSIAPService, ensuring these processes don't exist at shutdown time.
+
 ---
 
 ## 13. Integration into YAMDCC-3.0
@@ -642,8 +698,13 @@ MSI GPUSwitch's switching logic has been integrated into YAMDCC-3.0's `FanContro
 
 | File | Description |
 |---|---|
-| `AcpiProbe.cs` | WMI ACPI calling core, contains all probing and switching logic |
-| `Program.cs` | CLI entry point, command parsing |
+| `AcpiProbe.cs` | WMI ACPI calling core, probing + switching logic + `CleanupMsiHelpers()` |
+| `Program.cs` | CLI entry point, main menu (compact) + advanced debug submenu (`dbg`) |
+| `MsiApService.cs` | MSIAPService auto management (install/start/stop/uninstall, auto-set manual start) |
+| `WmiAcpiBootstrap.cs` | WMI ACPI one-time bootstrap (`bs`/`boot`/`unboot`) |
+| `UefiVariable.cs` | UEFI variable read/write (`uv`/`uvw`) |
+| `WmiProbe.cs` | WMI class enumeration and probing (read-only) |
+| `SystemInfo.cs` | System info display (model/BIOS/GPU) |
 | `PROGRESS.md` | Development process notes |
 | `gpu_il.txt` | IL decompilation of Feature_Manager.MainWindow (GPU switch portion) |
 | `scm_il.txt` | IL decompilation of API_Dynamic.SCM (Graphics_switch portion) |

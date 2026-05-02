@@ -1,19 +1,21 @@
 # 🎯 BREAKTHROUGH — 完全摆脱 Feature Manager 的 MSI GPU 切换
 
-**日期**: 2026-04-28  
-**状态**: ✅ **已实测验证成功** (绝影 14, 卸载 FM 状态下完成 Hybrid → Discrete 切换)
+**日期**: 2026-04-28 (突破) / 2026-05-02 (双向切换全部打通)  
+**状态**: ✅ **Hybrid ↔ Discrete 双向切换全部成功** (绝影 14, 工具自动管理 MSI 辅助服务)
 
 ---
 
 ## 一句话总结
 
-**MSI GPU 切换的真正完整公式 = WMI ACPI 引导 + EC 写入 + UEFI 变量写入 + 冷启动。完全不需要 Feature Manager / MSI Center 任何进程或服务。**
+**MSI GPU 切换的完整公式 = WMI ACPI 引导 + MSI 辅助服务 (按需) + EC 写入 + UEFI 变量写入 + 冷启动。工具已集成全自动管理, 无需手动安装 Feature Manager。**
 
-四个关键发现:
+关键发现:
 1. `msiapcfg.dll` + `MofImagePath` 注册表 — 让 wmiacpi.sys 加载 MSI ACPI BMF
-2. EC 写入 0xD1 / 0xBE — 通知 BIOS 切换请求
-3. **UEFI 变量 MsiDCVarData byte[5] bit0/bit1** — BIOS POST 时读取的真正提交位
-4. **必须冷启动 (关机+开机), 不能热重启** — EC 不断电时 BIOS 不应用 MUX 切换
+2. **MSIAPService 按需启动** — Discrete → Hybrid 方向需要 MSIAPService 在用户态运行 (OS-cooperation gate), 工具自动管理: 按需启动, 切换后自动停止, 设为手动启动
+3. EC 写入 0xD1 / 0xBE — 通知 BIOS 切换请求
+4. **UEFI 变量 MsiDCVarData byte[5] bit0/bit1** — BIOS POST 时读取的真正提交位
+5. **必须冷启动 (关机+开机), 不能热重启** — EC 不断电时 BIOS 不应用 MUX 切换
+6. **切换后自动清理** — Kill FM Service 进程 + 停止 MSIAPService, 避免关机时 0xe0434352 崩溃
 
 ---
 
@@ -50,6 +52,15 @@ HKLM\SYSTEM\CurrentControlSet\Services\WmiAcpi
     Type             = 0x1 (kernel driver)
     Start            = 0x3 (demand)
 ```
+
+### 2.1 反编译 InstallService() 的直接证据
+
+`install_service_il.txt` 里的 `MSIWMIACPI2.WmiAcpiLib2.InstallService()` 显示，MSI 安装 WMIACPI2 时只做了两件事：
+
+1. 把 `msiapcfg.dll` 从安装目录复制到 `C:\Windows\SysWOW64\`
+2. 写 `HKLM\SYSTEM\CurrentControlSet\Services\WmiAcpi\MofImagePath = %windir%\sysWOW64\msiapcfg.dll`
+
+这意味着，**让 `wmiacpi.sys` 正常加载 MSI ACPI BMF 的关键，是文件 + 注册表引导本身，而不是某个固定常驻进程**。
 
 ### 3. 验证文件本质
 

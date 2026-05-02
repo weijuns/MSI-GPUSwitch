@@ -5,8 +5,8 @@
 > 逆向工程成果: 完全破解 MSI 笔记本 (绝影 14 / Stealth 14) 的 GPU 三模式切换机制,
 > 可脱离 MSI Center 独立完成 Hybrid / Discrete / Eco(iGPU) 切换。
 
-> 🎯 **2026-04-28 重大突破**: 实现**完全脱离 Feature Manager** 的 GPU 切换 (Hybrid → Discrete 已实测成功)。  
-> 详细原理见 [`BREAKTHROUGH.md`](./BREAKTHROUGH.md).
+> 🎯 **2026-04-28 重大突破**: 发现 `msiapcfg.dll + MofImagePath` 是 MSI ACPI 绑定的关键引导条件, 并已验证可脱离 Feature Manager 完成 GPU 切换流程。  
+> 🔥 **2026-05-02 双向切换全部打通**: `Hybrid ↔ Discrete` 双向切换在无 Feature Manager 情况下全部成功! 工具自动管理 MSI 辅助服务 (按需启停, 不开机自启). 详细原理见 [`BREAKTHROUGH.md`](./BREAKTHROUGH.md).
 
 ---
 
@@ -34,23 +34,25 @@
 
 ### 实测结果 (绝影 14)
 
-| 方向 | 完全无 FM | 装 FM (MSIAPService 跑着) |
-|---|---|---|
-| **Hybrid → Discrete** | ✅ 成功 | ✅ 成功 |
-| **Discrete → Hybrid** | ❌ MUX 未执行 | **✅ 成功** |
+| 方向 | 完全无 FM | 装 FM (MSIAPService 跑着) | 自动辅助模式 |
+|---|---|---|---|
+| **Hybrid → Discrete** | ✅ 成功 | ✅ 成功 | ✅ 成功 |
+| **Discrete → Hybrid** | ❌ MUX 未执行 | **✅ 成功** | **✅ 成功** |
 
-**结论**: 代码逻辑 100% 正确; Discrete → Hybrid 需要 `MSIAPService.exe` 在用户态跑着 (做某种 OS-cooperation gate). 集成方案: 嵌入 `MSIAPService.exe` + 自动安装为 Windows Service 即可零依赖 FM.
+**结论**: 代码逻辑 100% 正确; Discrete → Hybrid 需要 `MSIAPService.exe` 在用户态跑着 (OS-cooperation gate). 工具已集成自动管理: 按需启动 MSI 辅助服务, 切换完成后自动停止, 服务设为手动启动 (开机不自启).
 
 ### 关键工具命令
 
 ```powershell
 MSI GPUSwitch.exe
+  gpuD     # Hybrid → Discrete (自动辅助, 双向打通)
+  gpuH     # Discrete → Hybrid (自动辅助, 双向打通)
+  gpuE     # Hybrid → Eco/iGPU (切换到核显模式)
+  qs       # 快速查看多处 GPU 状态位
   bs       # 检查 wmiacpi.sys MofImagePath 配置
   boot     # 引导: 复制 msiapcfg.dll + 写注册表 (一次性)
   uv       # 读 UEFI MsiDCVarData byte[5] 当前 GPU 模式
-  uvw      # 调试: 直接写 byte[5] (输入 hex)
-  gpuD     # Hybrid → Discrete (无 FM 可用)
-  gpuH     # Discrete → Hybrid (持久位变更, MUX 未必同步)
+  dbg      # 进入高级调试模式 (含所有探测/切换命令)
 ```
 
 **字节码语义** (UEFI MsiDCVarData byte[5]):
@@ -570,20 +572,51 @@ dotnet build "MSI GPUSwitch\GpuSwitch.csproj" -c Release
 
 ### 命令列表
 
+主菜单:
+
 | 命令 | 功能 |
 |---|---|
-| `gpuD` | 切换到独显直连 (Discrete) |
-| `gpuH` | 切换到混合输出 (Hybrid) |
-| `gpuE` | 切换到核显模式 (Eco/iGPU) |
+| `gpuD` | 切换到独显直连 (Discrete), 含自动辅助服务 + 关机提示 |
+| `gpuH` | 切换到混合输出 (Hybrid), 含自动辅助服务 + 关机提示 |
+| `gpuE` | 切换到核显模式 (Eco/iGPU), 含自动辅助服务 + 关机提示 |
 | `qs` | 快速查看 7 处 GPU 状态位 |
-| `r` | 完整读取 GPU 模式状态 |
-| `snap` | 保存全状态快照到 snapshot.txt |
+| `uv` | 读取 UEFI 变量 MsiDCVarData (当前持久化 GPU 模式) |
+| `bs` | 检查 WMI ACPI 引导状态 |
+| `boot` | 引导: 复制 msiapcfg.dll + 设置 MofImagePath 注册表 |
+| `dbg` | 进入高级调试模式 (所有探测/切换命令均保留) |
+| `0` | 退出 |
+
+高级调试模式 (输入 `dbg` 进入):
+
+| 命令 | 功能 |
+|---|---|
+| `1` | 显示系统基本信息 (机型/BIOS/显卡) |
+| `2` | 枚举 root\wmi 命名空间下的所有 MSI_* 类 |
+| `3` | 枚举 root\cimv2 下与 GPU 相关的类 |
+| `4` | Dump 某个指定 WMI 类的全部实例数据 |
+| `5` | Dump 某个指定 WMI 类的所有方法签名 |
+| `6` | 一键全量 dump (写到 dump.txt) |
 | `7` | 调用 Get_WMI (列出支持的数据块) |
 | `8` | 批量探测 Get_* / cmd 0x00~0x20 |
 | `9` | 手动调用任意 Get_* 方法 |
 | `p` | 描述 Package_32 类定义 |
 | `q` | 用 Package_32 扫描所有 Get_* × cmd |
-| `0` | 退出 |
+| `r` | 完整读取 GPU 模式状态 |
+| `snap` | 保存全状态快照到 snapshot.txt |
+| `d` | 一键完整探测 + 写到 acpi_probe.txt |
+| `s1/s0` | Set_BIOS 切独显/混合 (旧方法) |
+| `d1/d0` | Set_Device 切独显/混合 (旧方法) |
+| `dt1/dt0` | Set_Data cmd=0x04 切独显/混合 |
+| `ap1/ap0` | Set_AP cmd=0x00 切独显/混合 |
+| `b41/b40` | Set_BIOS cmd=0x04 切独显/混合 |
+| `cc` | Dump MSI_CentralControl 方法签名 |
+| `hb` | 写 OS 在线心跳 (EC 0xD9 bit0) |
+| `uvw` | 调试: 直接写 UEFI byte[5] |
+| `unboot` | 卸载引导 (删除 msiapcfg.dll + 清除注册表) |
+| `srv` | 查看 MSI Foundation Service 状态 |
+| `srv-install/start/stop/remove` | 服务管理 |
+| `auto` | 自动准备 MSI 辅助组件并切换 GPU |
+| `0` | 返回主菜单 |
 
 ### 切换示例
 
@@ -622,7 +655,10 @@ dotnet build "MSI GPUSwitch\GpuSwitch.csproj" -c Release
 | 3 | ❌ | ✅ | ❌ | ❌ | ❌ FM Service 立即退出 |
 | 4 | ❌ | ❌ | ✅ | ❌ | ✅ FM UI 自动拉起服务 |
 
-### 模式切换测试
+### 模式切换测试 (2026-05-02 更新)
+
+> **Hybrid ↔ Discrete 双向切换全部打通!** 所有 6 个方向均已验证成功。
+> 工具自动管理 MSI 辅助服务 (按需启停, 不开机自启), 切换完成后主动清理 (避免 FM Service 关机报错)。
 
 | 源模式 | 目标模式 | FW_GPU_CH | 结果 |
 |---|---|---|---|
@@ -632,6 +668,16 @@ dotnet build "MSI GPUSwitch\GpuSwitch.csproj" -c Release
 | Discrete | Eco/iGPU | 1→2 | ✅ 重启后生效 |
 | Eco/iGPU | Hybrid | 2→0 | ✅ 重启后生效 |
 | Eco/iGPU | Discrete | 2→1 | ✅ 重启后生效 |
+
+### MSI 辅助服务管理测试
+
+| 测试项 | 结果 |
+|---|---|
+| MSIAPService 安装为 Windows 服务 | ✅ 自动设为手动启动 |
+| 切换前自动启动 MSIAPService | ✅ 按需启动, 不干扰用户 |
+| 切换后自动停止 MSIAPService | ✅ 切换完成后 CleanupMsiHelpers() |
+| 切换后自动终止 FM Service 进程 | ✅ 避免关机时 0xe0434352 崩溃 |
+| 开机后 MSIAPService 不自动启动 | ✅ start=demand (手动) |
 
 ### Graphics_switch (SCM) 测试
 
@@ -683,6 +729,18 @@ dotnet build "MSI GPUSwitch\GpuSwitch.csproj" -c Release
 **原因**: 这些方法只修改运行时状态, 不触发 BIOS 的 MUX 重配置流程。
 **解决**: 必须使用 `Set_Data(0xD1)` + `Set_Data(0xBE)` 的两步写入流程。
 
+### 陷阱 7: MSIAPService 开机自动启动 (不需要)
+
+**现象**: 安装 MSIAPService 为 Windows 服务后, 每次开机它都在后台运行, 占用资源。
+**原因**: `InstallUtil.exe` 默认将服务注册为 Automatic 启动类型。
+**解决**: 安装后立即执行 `sc.exe config "MSI Foundation Service" start=demand`, 设为手动启动。工具已在 `MsiApService.Install()` 中自动处理。
+
+### 陷阱 8: Feature Manager Service.exe 关机崩溃 (0xe0434352)
+
+**现象**: 执行 GPU 切换后关机, 弹出 "Feature Manager Service.exe - 应用程序错误" (未知的软件异常 0xe0434352, 位置 0x00007FFAEF1D064C). 切换本身成功。
+**原因**: 切换完成后 MSIAPService 仍活着, 其依赖的 FM Service 进程在 Windows 关机时收到终止信号, .NET CLR 抛出未处理异常。
+**解决**: 工具在切换完成后自动调用 `CleanupMsiHelpers()`: 先 `Kill()` Feature Manager Service 进程, 再停止 MSIAPService, 确保关机时这些进程已不存在。
+
 ---
 
 ## 13. 整合进 YAMDCC-3.0
@@ -700,8 +758,13 @@ MSI GPUSwitch 的切换逻辑已整合进 YAMDCC-3.0 的 `FanControlService.cs`:
 
 | 文件 | 说明 |
 |---|---|
-| `AcpiProbe.cs` | WMI ACPI 调用核心, 包含所有探测和切换逻辑 |
-| `Program.cs` | 命令行入口, 命令解析 |
+| `AcpiProbe.cs` | WMI ACPI 调用核心, 包含所有探测和切换逻辑, 自动辅助服务管理 |
+| `Program.cs` | 命令行入口, 主菜单 + 高级调试子菜单 |
+| `MsiApService.cs` | MSI Foundation Service 自动管理 (安装/启动/停止/卸载/设为手动启动) |
+| `SystemInfo.cs` | 系统信息显示 (机型/BIOS/显卡) |
+| `WmiProbe.cs` | WMI 类枚举和探测 (只读) |
+| `WmiAcpiBootstrap.cs` | WMI ACPI 一次性引导 (复制 msiapcfg.dll + 设置 MofImagePath) |
+| `UefiVariable.cs` | UEFI 变量读写 (MsiDCVarData) |
 | `PROGRESS.md` | 研发过程记录 |
 | `gpu_il.txt` | Feature_Manager.MainWindow 的 IL 反编译 (GPU 切换部分) |
 | `scm_il.txt` | API_Dynamic.SCM 的 IL 反编译 (Graphics_switch 部分) |
